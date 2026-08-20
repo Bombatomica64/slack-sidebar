@@ -1,0 +1,8 @@
+# Written by the plugin at runtime and specific to one person's workspace
+# (identityUserId, pinned conversations, panel geometry).
+settings.json
+
+# Local editor / backup noise
+*.bak
+*.bak-*
+*~

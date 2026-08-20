@@ -1,0 +1,42 @@
+{
+  "id": "slack",
+  "name": "Slack",
+  "version": "0.6.0",
+  "minNoctaliaVersion": "4.0.0",
+  "author": "lollo",
+  "license": "MIT",
+  "description": "Read and send Slack messages from a full-height sidebar: conversation list with unread badges, threads, reactions and desktop notifications. Works with a user or bot token.",
+  "tags": [
+    "Bar",
+    "Panel",
+    "Productivity",
+    "Chat"
+  ],
+  "entryPoints": {
+    "main": "Main.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Panel.qml",
+    "settings": "Settings.qml"
+  },
+  "dependencies": {
+    "plugins": []
+  },
+  "metadata": {
+    "defaultSettings": {
+      "side": "right",
+      "panelWidth": 460,
+      "pollInterval": 45000,
+      "activePollInterval": 6000,
+      "syncInterval": 300000,
+      "historyLimit": 60,
+      "maxWatched": 24,
+      "notifyDms": true,
+      "notifyMentions": true,
+      "markReadOnOpen": true,
+      "pinned": [],
+      "identityUserId": "",
+      "tokenPreference": "auto",
+      "redirectUri": "https://localhost:3000"
+    }
+  }
+}

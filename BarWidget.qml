@@ -1,3 +1,6 @@
+// The badge/dot Loaders below read `root` from the enclosing component.
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import qs.Commons
@@ -15,9 +18,9 @@ NIconButton {
     property int sectionWidgetsCount: 0
 
     readonly property var main: pluginApi?.mainInstance
-    readonly property int unreadCount: main?.totalUnread ?? 0
-    readonly property int mentionCount: main?.mentionCount ?? 0
-    readonly property bool hasError: (main?.lastError ?? "") !== ""
+    readonly property int unreadCount: root.main?.totalUnread ?? 0
+    readonly property int mentionCount: root.main?.mentionCount ?? 0
+    readonly property bool hasError: (root.main?.lastError ?? "") !== ""
 
     baseSize: Style.getCapsuleHeightForScreen(screen?.name)
     applyUiScale: false
@@ -27,18 +30,18 @@ NIconButton {
 
     tooltipText: {
         if (root.hasError)
-            return "Slack: " + main.lastError;
-        if (!(main?.connected ?? false))
+            return "Slack: " + root.main.lastError;
+        if (!(root.main?.connected ?? false))
             return "Slack: not connected";
 
-        const list = (main?.decorated ?? []).filter(c => c.unread > 0).slice(0, 6);
+        const list = (root.main?.decorated ?? []).filter(c => c.unread > 0).slice(0, 6);
         if (list.length === 0)
             return "Slack: all caught up";
 
         let lines = [];
         for (const c of list)
             lines.push((c.type === "channel" || c.type === "private" ? "#" : "") + c.name + " · " + c.unread + (c.mention ? " (mention)" : ""));
-        if (root.unreadCount > 0 && (main?.decorated ?? []).filter(c => c.unread > 0).length > list.length)
+        if (root.unreadCount > 0 && (root.main?.decorated ?? []).filter(c => c.unread > 0).length > list.length)
             lines.push("…");
         return lines.join("\n");
     }
@@ -61,7 +64,7 @@ NIconButton {
             pluginApi.togglePanel(screen, root);
     }
 
-    onRightClicked: main?.refreshAll()
+    onRightClicked: root.main?.refreshAll()
 
     Loader {
         anchors.horizontalCenter: parent.horizontalCenter
@@ -98,7 +101,7 @@ NIconButton {
         anchors.horizontalCenterOffset: parent.baseSize / 3
         anchors.verticalCenterOffset: -parent.baseSize / 3
         z: 2
-        active: root.unreadCount === 0 && (root.hasError || !(main?.connected ?? false))
+        active: root.unreadCount === 0 && (root.hasError || !(root.main?.connected ?? false))
         sourceComponent: Rectangle {
             width: 7
             height: 7

@@ -3,6 +3,8 @@
 settings.json
 
 # Local editor / backup noise
+# .qmlls.ini holds an absolute import path, so it stays out of the repo.
+.qmlls.ini
 *.bak
 *.bak-*
 *~

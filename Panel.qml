@@ -17,19 +17,19 @@ Item {
 
     // ---- consumed by PluginPanelSlot / SmartPanel -------------------------
     readonly property bool allowAttach: true
-    readonly property string side: main?.sidePref ?? "right"
+    readonly property string side: root.main?.sidePref ?? "right"
     readonly property bool panelAnchorRight: side !== "left"
     readonly property bool panelAnchorLeft: side === "left"
     readonly property bool panelAnchorVerticalCenter: true
     // Deliberately larger than any screen: SmartPanel clamps this to the space
     // actually available, which is how the panel becomes full height.
     readonly property real contentPreferredHeight: 100000
-    readonly property real contentPreferredWidth: (main?.panelWidthPref ?? 460) * Style.uiScaleRatio
+    readonly property real contentPreferredWidth: (root.main?.panelWidthPref ?? 460) * Style.uiScaleRatio
     // ----------------------------------------------------------------------
 
-    readonly property bool inChat: (main?.activeId ?? "") !== ""
-    readonly property var activeConv: main?.activeConversation ?? null
-    readonly property bool inThread: (main?.threadTs ?? "") !== ""
+    readonly property bool inChat: (root.main?.activeId ?? "") !== ""
+    readonly property var activeConv: root.main?.activeConversation ?? null
+    readonly property bool inThread: (root.main?.threadTs ?? "") !== ""
 
     anchors.fill: parent
 
@@ -59,26 +59,26 @@ Item {
                 label: "My account",
                 icon: "user",
                 action: "user",
-                enabled: main?.haveUserToken ?? false
+                enabled: root.main?.haveUserToken ?? false
             },
             {
                 label: "The app",
                 icon: "robot",
                 action: "bot",
-                enabled: main?.haveBotToken ?? false
+                enabled: root.main?.haveBotToken ?? false
             },
             {
-                label: (main?.signingIn ?? false) ? "Waiting for Slack…" : ((main?.haveUserToken ?? false) ? "Sign in again…" : "Sign in with Slack…"),
+                label: (root.main?.signingIn ?? false) ? "Waiting for Slack…" : ((root.main?.haveUserToken ?? false) ? "Sign in again…" : "Sign in with Slack…"),
                 icon: "key",
                 action: "signin",
-                enabled: (main?.canSignIn ?? false) && !(main?.signingIn ?? false)
+                enabled: (root.main?.canSignIn ?? false) && !(root.main?.signingIn ?? false)
             }
         ]
         onTriggered: action => {
             if (action === "signin")
-                main.signIn();
+                root.main.signIn();
             else
-                main.requestIdentity(action);
+                root.main.requestIdentity(action);
         }
     }
 
@@ -104,16 +104,16 @@ Item {
                 tooltipText: "All conversations"
                 onClicked: {
                     if (root.inThread)
-                        main.closeThread();
+                        root.main.closeThread();
                     else
-                        main.closeConversation();
+                        root.main.closeConversation();
                 }
             }
 
             NIcon {
                 visible: !root.inChat
                 icon: "brand-slack"
-                color: (main?.totalUnread ?? 0) > 0 ? Color.mPrimary : Color.mOnSurfaceVariant
+                color: (root.main?.totalUnread ?? 0) > 0 ? Color.mPrimary : Color.mOnSurfaceVariant
                 pointSize: Style.fontSizeXL
             }
 
@@ -138,8 +138,8 @@ Item {
                             if (root.inThread)
                                 return "Thread";
                             if (root.inChat)
-                                return root.activeConv ? root.activeConv.name : main.activeId;
-                            return main?.teamName !== "" ? main.teamName : "Slack";
+                                return root.activeConv ? root.activeConv.name : root.main.activeId;
+                            return root.main?.teamName !== "" ? root.main.teamName : "Slack";
                         }
                         color: Color.mOnSurface
                         font.weight: Style.fontWeightBold
@@ -151,32 +151,32 @@ Item {
                 NText {
                     Layout.fillWidth: true
                     text: {
-                        if (!main)
+                        if (!root.main)
                             return "";
-                        if (main.lastError !== "")
-                            return main.lastError;
-                        if (main.signingIn)
+                        if (root.main.lastError !== "")
+                            return root.main.lastError;
+                        if (root.main.signingIn)
                             return "Approve the sign-in in your browser…";
-                        if (!root.inChat && !main.haveUserToken && !main.canSignIn)
+                        if (!root.inChat && !root.main.haveUserToken && !root.main.canSignIn)
                             return "Add the app's Client ID and Secret in settings to sign in as yourself";
                         // Worth one line in the header: a token that works now but
                         // will expire unrenewably is otherwise silent until it dies.
-                        if (!root.inChat && main.userTokenHint !== "")
-                            return main.userTokenHint;
+                        if (!root.inChat && root.main.userTokenHint !== "")
+                            return root.main.userTokenHint;
                         if (root.inThread)
                             return root.activeConv ? ("in " + root.activeConv.name) : "";
                         if (root.inChat)
-                            return root.activeConv && root.activeConv.topic !== "" ? root.activeConv.topic : (main.meName !== "" ? ("you are " + main.meName) : "");
-                        if (main.totalUnread > 0)
-                            return main.totalUnread + " unread" + (main.mentionCount > 0 ? (" · " + main.mentionCount + " with mentions") : "");
-                        return main.connected ? "All caught up" : "Not connected";
+                            return root.activeConv && root.activeConv.topic !== "" ? root.activeConv.topic : (root.main.meName !== "" ? ("you are " + root.main.meName) : "");
+                        if (root.main.totalUnread > 0)
+                            return root.main.totalUnread + " unread" + (root.main.mentionCount > 0 ? (" · " + root.main.mentionCount + " with mentions") : "");
+                        return root.main.connected ? "All caught up" : "Not connected";
                     }
                     color: {
-                        if ((main?.lastError ?? "") !== "")
+                        if ((root.main?.lastError ?? "") !== "")
                             return Color.mError;
-                        if (main?.signingIn ?? false)
+                        if (root.main?.signingIn ?? false)
                             return Color.mSecondary;
-                        if (!root.inChat && (main?.userTokenHint ?? "") !== "")
+                        if (!root.inChat && (root.main?.userTokenHint ?? "") !== "")
                             return Color.mTertiary;
                         return Color.mOnSurfaceVariant;
                     }
@@ -190,9 +190,9 @@ Item {
                 id: accountChip
 
                 readonly property color accent: {
-                    if (!main || !main.connected)
+                    if (!root.main || !root.main.connected)
                         return Color.mError;
-                    return main.botMode ? Color.mTertiary : Color.mPrimary;
+                    return root.main.botMode ? Color.mTertiary : Color.mPrimary;
                 }
 
                 Layout.alignment: Qt.AlignVCenter
@@ -220,13 +220,13 @@ Item {
                     spacing: Style.marginXXS
 
                     NIcon {
-                        icon: (main?.botMode ?? false) ? "robot" : "user"
+                        icon: (root.main?.botMode ?? false) ? "robot" : "user"
                         color: chipHover.hovered ? Color.mOnHover : accountChip.accent
                         pointSize: Style.fontSizeXS
                     }
 
                     NText {
-                        text: main?.accountLabel ?? ""
+                        text: root.main?.accountLabel ?? ""
                         color: chipHover.hovered ? Color.mOnHover : accountChip.accent
                         pointSize: Style.fontSizeXXS
                         font.weight: Style.fontWeightSemiBold
@@ -255,7 +255,7 @@ Item {
                 colorBgHover: Color.mHover
                 colorFg: (root.activeConv?.pinned ?? false) ? Color.mPrimary : Color.mOnSurfaceVariant
                 tooltipText: (root.activeConv?.pinned ?? false) ? "Stop watching" : "Watch for new messages"
-                onClicked: main.togglePin(main.activeId)
+                onClicked: root.main.togglePin(root.main.activeId)
             }
 
             NIconButton {
@@ -266,7 +266,7 @@ Item {
                 colorBgHover: Color.mHover
                 colorFg: Color.mOnSurfaceVariant
                 tooltipText: "Open in Slack"
-                onClicked: main.openInSlack(main.activeId)
+                onClicked: root.main.openInSlack(root.main.activeId)
             }
 
             NIconButton {
@@ -276,9 +276,9 @@ Item {
                 colorBg: "transparent"
                 colorBgHover: Color.mHover
                 colorFg: Color.mOnSurfaceVariant
-                enabled: !(main?.polling ?? false)
-                tooltipText: (main?.lastUpdate ?? "") !== "" ? ("Refresh (last: " + main.lastUpdate + ")") : "Refresh"
-                onClicked: main.refreshAll()
+                enabled: !(root.main?.polling ?? false)
+                tooltipText: (root.main?.lastUpdate ?? "") !== "" ? ("Refresh (last: " + root.main.lastUpdate + ")") : "Refresh"
+                onClicked: root.main.refreshAll()
             }
         }
 
@@ -318,12 +318,12 @@ Item {
 
                 Slack.ConversationList {
                     anchors.fill: parent
-                    conversations: main?.decorated ?? []
-                    users: main?.userMap ?? ({})
-                    activeId: main?.activeId ?? ""
-                    botMode: main?.botMode ?? false
-                    onConversationPicked: id => main.openConversation(id)
-                    onPinToggled: id => main.togglePin(id)
+                    conversations: root.main?.decorated ?? []
+                    users: root.main?.userMap ?? ({})
+                    activeId: root.main?.activeId ?? ""
+                    botMode: root.main?.botMode ?? false
+                    onConversationPicked: id => root.main.openConversation(id)
+                    onPinToggled: id => root.main.togglePin(id)
                 }
             }
 
@@ -357,23 +357,23 @@ Item {
                         id: transcript
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        messages: root.inThread ? (main?.threadMessages ?? []) : (main?.activeMessages ?? [])
-                        users: main?.userMap ?? ({})
-                        customEmoji: main?.customEmoji ?? ({})
-                        avatarMap: main?.avatarMap ?? ({})
-                        meId: main?.meId ?? ""
-                        readCursor: root.inThread ? "" : (main?.activeReadCursor ?? "")
+                        messages: root.inThread ? (root.main?.threadMessages ?? []) : (root.main?.activeMessages ?? [])
+                        users: root.main?.userMap ?? ({})
+                        customEmoji: root.main?.customEmoji ?? ({})
+                        avatarMap: root.main?.avatarMap ?? ({})
+                        meId: root.main?.meId ?? ""
+                        readCursor: root.inThread ? "" : (root.main?.activeReadCursor ?? "")
                         inThread: root.inThread
-                        loading: root.inThread ? (main?.threadLoading ?? false) : (main?.activeLoading ?? false)
+                        loading: root.inThread ? (root.main?.threadLoading ?? false) : (root.main?.activeLoading ?? false)
                         emptyText: {
                             if (root.inThread)
                                 return "No replies yet";
-                            if (main?.activeNeedsJoin ?? false)
+                            if (root.main?.activeNeedsJoin ?? false)
                                 return "Join this channel to read it";
                             return "No messages in this conversation yet";
                         }
-                        onThreadRequested: ts => main.openThread(ts)
-                        onReactionToggled: (ts, name, mine) => main.toggleReaction(ts, name, mine)
+                        onThreadRequested: ts => root.main.openThread(ts)
+                        onReactionToggled: (ts, name, mine) => root.main.toggleReaction(ts, name, mine)
                         onCopyRequested: text => root.copyToClipboard(text)
                     }
 
@@ -381,7 +381,7 @@ Item {
                     // the channel, so it is an explicit button, never implicit.
                     Rectangle {
                         Layout.fillWidth: true
-                        visible: main?.activeNeedsJoin ?? false
+                        visible: root.main?.activeNeedsJoin ?? false
                         implicitHeight: joinCol.implicitHeight + Style.margin2M
                         radius: Style.radiusM
                         color: Color.mSurfaceVariant
@@ -399,7 +399,7 @@ Item {
 
                             NText {
                                 Layout.fillWidth: true
-                                text: (main?.botMode ?? false) ? "This app has not joined this channel yet. Slack won't return its history until it does — and joining shows up in the channel." : "You are not in this channel yet. Join to read and post."
+                                text: (root.main?.botMode ?? false) ? "This app has not joined this channel yet. Slack won't return its history until it does — and joining shows up in the channel." : "You are not in this channel yet. Join to read and post."
                                 color: Color.mOnSurfaceVariant
                                 pointSize: Style.fontSizeXS
                                 wrapMode: Text.WordWrap
@@ -407,20 +407,20 @@ Item {
 
                             NButton {
                                 Layout.alignment: Qt.AlignLeft
-                                icon: (main?.joining ?? false) ? "loader-2" : "plus"
-                                text: (main?.joining ?? false) ? "Joining…" : ((main?.botMode ?? false) ? "Join as app" : "Join channel")
-                                enabled: !(main?.joining ?? false)
-                                onClicked: main.joinConversation(main.activeId)
+                                icon: (root.main?.joining ?? false) ? "loader-2" : "plus"
+                                text: (root.main?.joining ?? false) ? "Joining…" : ((root.main?.botMode ?? false) ? "Join as app" : "Join channel")
+                                enabled: !(root.main?.joining ?? false)
+                                onClicked: root.main.joinConversation(root.main.activeId)
                             }
                         }
                     }
 
                     Slack.Composer {
                         id: composer
-                        visible: !(main?.activeNeedsJoin ?? false)
+                        visible: !(root.main?.activeNeedsJoin ?? false)
                         Layout.fillWidth: true
-                        busy: main?.sending ?? false
-                        errorText: main?.sendError ?? ""
+                        busy: root.main?.sending ?? false
+                        errorText: root.main?.sendError ?? ""
                         placeholder: {
                             if (root.inThread)
                                 return "Reply in thread";
@@ -430,7 +430,7 @@ Item {
                         }
                         onSubmitted: text => {
                             transcript.stickToLatest = true;
-                            main.send(text);
+                            root.main.send(text);
                         }
                     }
                 }

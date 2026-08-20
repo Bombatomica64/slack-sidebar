@@ -4,6 +4,10 @@ import Quickshell.Io
 import qs.Commons
 import "Components/Mrkdwn.js" as Mrkdwn
 
+// Quickshell declares Process.exited's exitStatus as the unregistered C++
+// enum QProcess::ExitStatus, which qmllint cannot resolve. Runtime is fine.
+// qmllint disable signal-handler-parameters
+
 /**
  * Slack plugin state holder.
  *

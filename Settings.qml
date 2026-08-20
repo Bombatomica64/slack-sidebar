@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Layouts
-import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Widgets
@@ -212,7 +211,7 @@ ColumnLayout {
     Process {
         id: credentialsProbe
         running: true
-        command: ["bash", (pluginApi?.pluginDir ?? "") + "/slack.sh", "credentials"]
+        command: ["bash", (root.pluginApi?.pluginDir ?? "") + "/slack.sh", "credentials"]
         stdout: StdioCollector {
             onStreamFinished: {
                 try {

@@ -5,6 +5,7 @@
   "minNoctaliaVersion": "4.0.0",
   "author": "lollo",
   "license": "MIT",
+  "repository": "https://github.com/Bombatomica64/slack-sidebar",
   "description": "Read and send Slack messages from a full-height sidebar: conversation list with unread badges, threads, reactions and desktop notifications. Works with a user or bot token.",
   "tags": [
     "Bar",

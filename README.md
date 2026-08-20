@@ -14,7 +14,7 @@ Requires **noctalia-shell 4.x** (developed against 4.7.7) and `curl`, `jq`,
 for notifications, `openssl` for the sign-in callback's local certificate.
 
 ```sh
-git clone <REPO_URL> ~/.config/noctalia/plugins/slack
+git clone https://github.com/Bombatomica64/slack-sidebar.git ~/.config/noctalia/plugins/slack
 ```
 
 Then enable **Slack** in Noctalia's Settings → Plugins, and add its widget to the

@@ -68,6 +68,7 @@ Item {
     property var conversations: []          // [{id, type, name, user, image, topic}]
     property var userMap: ({})              // id -> {name, realName, image}, for mention resolution
     property var customEmoji: ({})          // {emoji: {name: localPath}, aliases: {name: target}}
+    property var avatarMap: ({})            // userId -> local avatar file, for notification icons
 
     // Message text is rendered to rich text here, once, rather than in a delegate
     // binding: re-running the whole mrkdwn pipeline for every row that scrolls
@@ -82,6 +83,20 @@ Item {
             emojiSize: Math.round(Style.fontSizeL * Style.uiScaleRatio),
             muted: String(Color.mOnSurfaceVariant)
         })
+
+    function _mergeUsers(incoming) {
+        if (!incoming)
+            return;
+        let fresh = false;
+        for (const id in incoming) {
+            if (!root.userMap[id]) {
+                fresh = true;
+                break;
+            }
+        }
+        if (fresh)
+            root.userMap = Object.assign({}, root.userMap, incoming);
+    }
 
     function _render(list) {
         const colors = root.renderColors;
@@ -282,6 +297,10 @@ Item {
 
     function refreshEmoji() {
         _run(emojiProc, ["emoji"]);
+    }
+
+    function refreshAvatars() {
+        _run(avatarsProc, ["avatars"]);
     }
 
     function refreshCredentials() {
@@ -514,8 +533,22 @@ Item {
         Quickshell.execDetached(["xdg-open", url]);
     }
 
-    function notify(title, body) {
-        Quickshell.execDetached(["notify-send", "-a", "Slack", "-i", "slack-indicator", title, body]);
+    function notify(title, body, iconPath) {
+        const args = ["notify-send", "-a", "Slack"];
+        if (iconPath)
+            // Noctalia prefers the image hint over the app icon, and it wants a
+            // real file — hence the mirrored avatars.
+            args.push("--hint=string:image-path:" + iconPath);
+        else
+            args.push("-i", "slack-indicator");
+        args.push(title, body);
+        Quickshell.execDetached(args);
+    }
+
+    function _isMe(userId) {
+        if (!userId)
+            return false;
+        return userId === root.meId || (root.identityUserId !== "" && userId === root.identityUserId);
     }
 
     function _notifyForPoll(next) {
@@ -526,20 +559,28 @@ Item {
         for (const id in next) {
             const st = next[id];
             const before = root._prevUnread[id] || 0;
-            if ((st.unread || 0) <= before || !st.latest)
+            if ((st.unread || 0) <= before)
                 continue;
             if (id === root.activeId)
+                continue;
+            // Announce the newest genuinely unread message. `latest` can be your
+            // own reply sitting on top of it, which is what used to get reported.
+            const msg = st.latestUnread;
+            if (!msg || root._isMe(msg.user))
                 continue;
             let conv = null;
             for (const c of root.conversations)
                 if (c.id === id)
                     conv = c;
-            const isDm = conv && (conv.type === "im" || conv.type === "mpim");
-            const wanted = (isDm && root.notifyDms) || (st.mention && root.notifyMentions);
+            const isDm = conv && conv.type === "im";
+            const isGroupDm = conv && conv.type === "mpim";
+            const wanted = ((isDm || isGroupDm) && root.notifyDms) || (st.mention && root.notifyMentions);
             if (!wanted)
                 continue;
             const where = conv ? (isDm ? conv.name : "#" + conv.name) : id;
-            root.notify(where, st.latest.author + ": " + st.latest.text);
+            // In a 1:1 the title already names the sender.
+            const body = isDm ? msg.text : (msg.author + ": " + msg.text);
+            root.notify(where, body, root.avatarMap[msg.user] || "");
         }
     }
 
@@ -549,10 +590,18 @@ Item {
         refreshIdentity();
         refreshList(false);
         refreshEmoji();
+        refreshAvatars();
         refreshCredentials();
     }
 
     onWatchedIdsChanged: pollDebounce.restart()
+    onUserMapChanged: avatarDebounce.restart()
+
+    Timer {
+        id: avatarDebounce
+        interval: 4000
+        onTriggered: root.refreshAvatars()
+    }
 
     Timer {
         id: pollDebounce
@@ -684,8 +733,7 @@ Item {
                     return;
                 const messages = res.messages || [];
                 // Users first: mentions inside the rendered text resolve against them.
-                if (res.users)
-                    root.userMap = Object.assign({}, root.userMap, res.users);
+                root._mergeUsers(res.users);
                 if (root._changed("_activeSig", messages))
                     root.activeMessages = root._render(messages);
                 root.activeReadCursor = res.readCursor || "";
@@ -705,8 +753,7 @@ Item {
                 const res = root._parse(this.text, "thread");
                 if (res && res.ok === true) {
                     const messages = res.messages || [];
-                    if (res.users)
-                        root.userMap = Object.assign({}, root.userMap, res.users);
+                    root._mergeUsers(res.users);
                     if (root._changed("_threadSig", messages))
                         root.threadMessages = root._render(messages);
                 }
@@ -772,6 +819,18 @@ Item {
                     root._pollAgain = true;
                 else
                     root.poll();
+            }
+        }
+        stderr: StdioCollector {}
+    }
+
+    Process {
+        id: avatarsProc
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const res = root._parse(this.text, "avatars");
+                if (res && res.ok === true)
+                    root.avatarMap = res.avatars || ({});
             }
         }
         stderr: StdioCollector {}

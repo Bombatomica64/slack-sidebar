@@ -360,6 +360,7 @@ Item {
                         messages: root.inThread ? (main?.threadMessages ?? []) : (main?.activeMessages ?? [])
                         users: main?.userMap ?? ({})
                         customEmoji: main?.customEmoji ?? ({})
+                        avatarMap: main?.avatarMap ?? ({})
                         meId: main?.meId ?? ""
                         readCursor: root.inThread ? "" : (main?.activeReadCursor ?? "")
                         inThread: root.inThread

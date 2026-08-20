@@ -23,6 +23,7 @@ Item {
     property var messages: []
     property var users: ({})
     property var customEmoji: ({})
+    property var avatarMap: ({})
     property string meId: ""
     property string readCursor: ""
     property bool inThread: false
@@ -173,6 +174,7 @@ Item {
                 olderMsg: cell.olderMsg
                 users: root.users
                 customEmoji: root.customEmoji
+                avatarMap: root.avatarMap
                 meId: root.meId
                 inThread: root.inThread
                 onThreadRequested: ts => root.threadRequested(ts)

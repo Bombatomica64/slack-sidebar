@@ -527,6 +527,14 @@ cmd_poll() {
                 author: (if ($latest.user // "") != "" then ($users[$latest.user].name // $latest.username // "someone") else ($latest.username // "bot") end),
                 mine: (($mine | index($latest.user // "")) != null),
                 text: ($latest.text // "" | gsub("\\s+"; " ") | .[0:140])
+              } end),
+              # The newest message that is actually unread. `latest` can be your
+              # own reply, which must never be what a notification announces.
+              latestUnread: (($new | first) as $u | if $u == null then null else {
+                ts: $u.ts,
+                user: ($u.user // ""),
+                author: (if ($u.user // "") != "" then ($users[$u.user].name // $u.username // "someone") else ($u.username // "bot") end),
+                text: ($u.text // "" | gsub("\\s+"; " ") | .[0:140])
               } end)
             })
       )
@@ -629,6 +637,41 @@ cmd_emoji() {
       }'
 }
 
+# Profile pictures, mirrored locally. Notification daemons want a real file for
+# the image-path hint, and local files also spare the UI a network fetch per row.
+cmd_avatars() {
+  local img_dir="$CACHE_DIR/avatars"
+  mkdir -p "$img_dir" 2>/dev/null
+
+  local raw; raw="$(users_cache_read)"
+  local n=0 id url ext target
+  while IFS=$'\t' read -r id url; do
+    [[ -z "$id" || -z "$url" ]] && continue
+    ext="${url##*.}"
+    case "$ext" in png|gif|jpg|jpeg|webp) ;; *) ext="png" ;; esac
+    target="$img_dir/$id.$ext"
+    [[ -s "$target" ]] && continue
+    curl -sf --max-time 15 -o "$target" "$url" &
+    (( ++n % MAX_PARALLEL == 0 )) && wait
+    (( n >= 200 )) && break
+  done < <(jq -r 'to_entries[] | select((.value.image // "") != "") | "\(.key)\t\(.value.image)"' <<<"$raw")
+  wait
+
+  jq -n -c --argjson raw "$raw" --arg dir "$img_dir" '{
+    ok: true,
+    avatars: (
+      $raw
+      | with_entries(select((.value.image // "") != ""))
+      | with_entries({
+          key: .key,
+          value: ($dir + "/" + .key + "." + (
+            .value.image | split("?")[0] | split(".") | last
+            | if . == "png" or . == "gif" or . == "jpg" or . == "jpeg" or . == "webp" then . else "png" end))
+        })
+    )
+  }'
+}
+
 # Joining is a visible act in the channel, so the UI asks first rather than
 # doing it implicitly when you click a channel you are not in.
 cmd_join() {
@@ -667,6 +710,7 @@ case "${1:-}" in
   react)     cmd_react "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
   join)      cmd_join "${2:-}" ;;
   emoji)     cmd_emoji ;;
+  avatars)   cmd_avatars ;;
   sync-read) cmd_sync_read "${2:-}" ;;
   users)     jq -n --argjson u "$(users_cache_read)" '{ok:true, users:$u}' ;;
   reset)     rm -f "$CONVOS_CACHE" "$USERS_CACHE" "$ME_CACHE"; jq -n '{ok:true}' ;;
@@ -686,5 +730,5 @@ case "${1:-}" in
                --argjson secret "$([[ -n "$(secret-tool lookup service slack-agents account client-secret 2>/dev/null)" ]] && echo true || echo false)" \
                --argjson refresh "$([[ -n "$(lookup_token user-refresh-token)" ]] && echo true || echo false)" \
                '{ok:true, haveClientId:$id, haveClientSecret:$secret, haveRefreshToken:$refresh}' ;;
-  *)         fail "usage: slack.sh [--token user|bot|auto] [--me <userId>] {me|list|poll|history|replies|send|read|react|join|emoji|sync-read|users|tokens|credentials|set-credentials|reset}" ;;
+  *)         fail "usage: slack.sh [--token user|bot|auto] [--me <userId>] {me|list|poll|history|replies|send|read|react|join|emoji|avatars|sync-read|users|tokens|credentials|set-credentials|reset}" ;;
 esac

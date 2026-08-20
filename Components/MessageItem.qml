@@ -23,6 +23,7 @@ Item {
     property var olderMsg: null
     property var users: ({})
     property var customEmoji: ({})
+    property var avatarMap: ({})
     property string meId: ""
     property bool inThread: false
     property real avatarSize: 26 * Style.uiScaleRatio
@@ -57,7 +58,9 @@ Item {
         height: root.avatarSize
         visible: !root.grouped
         radius: root.avatarSize / 2
-        imagePath: root.msg.image || ""
+        // Prefer the mirrored file: a local avatar cannot pop in late the way a
+        // network fetch does while scrolling.
+        imagePath: root.avatarMap[root.msg.user] || root.msg.image || ""
         fallbackIcon: root.msg.isBot ? "robot" : "user"
         fallbackIconSize: Style.fontSizeM
     }

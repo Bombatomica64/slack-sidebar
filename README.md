@@ -132,6 +132,12 @@ you have open is polled faster, on its own timer.
   at your read cursor, reactions (click to toggle), thread reply counts, file
   links, link unfurls. Hover a message for *reply in thread* and *copy*.
 - **Composer** — Enter sends, Shift+Enter adds a line, grows to six lines.
+- **Notifications** — for DMs and mentions, announcing the newest genuinely
+  *unread* message (never your own reply sitting on top of it) with the sender's
+  profile picture as the icon. Avatars are mirrored to
+  `~/.cache/noctalia-slack/avatars/` and passed as the `image-path` hint, since
+  notification daemons want a real file; the same local files are used in the
+  transcript so an avatar cannot pop in late while scrolling.
 
 Message text is rendered through `Components/Mrkdwn.js`: mentions, channel
 links, URLs, `*bold*`, `_italic_`, `~strike~`, inline code, fenced blocks,
@@ -179,6 +185,7 @@ blockquotes and `:emoji:`.
 ./slack.sh --token bot me            # force an identity
 ./slack.sh tokens                    # which identities are available
 ./slack.sh emoji                     # sync custom workspace emoji
+./slack.sh avatars                   # mirror profile pictures locally
 ./slack.sh credentials               # is the app able to sign in / renew?
 ./oauth-login.py https://localhost:3000   # the sign-in flow, standalone
 ./slack.sh reset            # drop the conversation/user/identity caches

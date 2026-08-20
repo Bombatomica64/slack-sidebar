@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import qs.Commons
@@ -126,6 +128,8 @@ Item {
             model: root.msg.attachments || []
 
             delegate: Item {
+                id: attachment
+
                 required property var modelData
 
                 width: column.width
@@ -149,7 +153,7 @@ Item {
                     NText {
                         width: parent.width
                         visible: text !== ""
-                        text: modelData.title || ""
+                        text: attachment.modelData.title || ""
                         color: Color.mSecondary
                         pointSize: Style.fontSizeXS
                         font.weight: Style.fontWeightSemiBold
@@ -161,7 +165,7 @@ Item {
                     NText {
                         width: parent.width
                         visible: text !== ""
-                        text: Mrkdwn.preview(modelData.text || "", root.users)
+                        text: Mrkdwn.preview(attachment.modelData.text || "", root.users)
                         color: Color.mOnSurfaceVariant
                         pointSize: Style.fontSizeXS
                         wrapMode: Text.Wrap
@@ -178,6 +182,8 @@ Item {
             model: root.msg.files || []
 
             delegate: Rectangle {
+                id: fileRow
+
                 required property var modelData
 
                 width: column.width
@@ -202,7 +208,7 @@ Item {
                     }
 
                     NText {
-                        text: modelData.name || "file"
+                        text: fileRow.modelData.name || "file"
                         color: Color.mOnSurface
                         pointSize: Style.fontSizeXS
                         elide: Text.ElideMiddle
@@ -214,8 +220,8 @@ Item {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
-                        if (modelData.url)
-                            Quickshell.execDetached(["xdg-open", modelData.url]);
+                        if (fileRow.modelData.url)
+                            Quickshell.execDetached(["xdg-open", fileRow.modelData.url]);
                     }
                 }
             }
@@ -230,14 +236,16 @@ Item {
                 model: root.msg.reactions || []
 
                 delegate: Rectangle {
+                    id: reaction
+
                     required property var modelData
 
                     height: Math.round(18 * Style.uiScaleRatio)
                     width: reactionRow.width + Style.marginS
                     radius: height / 2
-                    color: modelData.mine ? Qt.alpha(Color.mPrimary, 0.18) : Color.mSurfaceVariant
+                    color: reaction.modelData.mine ? Qt.alpha(Color.mPrimary, 0.18) : Color.mSurfaceVariant
                     border.width: Style.borderS
-                    border.color: modelData.mine ? Color.mPrimary : Color.mOutline
+                    border.color: reaction.modelData.mine ? Color.mPrimary : Color.mOutline
 
                     Row {
                         id: reactionRow
@@ -247,8 +255,8 @@ Item {
 
                         NText {
                             text: {
-                                const html = Mrkdwn.emojiHtml(modelData.name, root.customEmoji, Math.round(Style.fontSizeM * Style.uiScaleRatio));
-                                return html !== null ? html : (":" + modelData.name + ":");
+                                const html = Mrkdwn.emojiHtml(reaction.modelData.name, root.customEmoji, Math.round(Style.fontSizeM * Style.uiScaleRatio));
+                                return html !== null ? html : (":" + reaction.modelData.name + ":");
                             }
                             richTextEnabled: true
                             textFormat: Text.RichText
@@ -257,9 +265,9 @@ Item {
                         }
 
                         NText {
-                            text: String(modelData.count)
+                            text: String(reaction.modelData.count)
                             pointSize: Style.fontSizeXXS
-                            color: modelData.mine ? Color.mPrimary : Color.mOnSurfaceVariant
+                            color: reaction.modelData.mine ? Color.mPrimary : Color.mOnSurfaceVariant
                             font.weight: Style.fontWeightBold
                         }
                     }
@@ -267,7 +275,7 @@ Item {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: root.reactionToggled(root.msg.ts, modelData.name, modelData.mine === true)
+                        onClicked: root.reactionToggled(root.msg.ts, reaction.modelData.name, reaction.modelData.mine === true)
                     }
                 }
             }

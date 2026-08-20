@@ -118,7 +118,11 @@ Item {
                         leftPadding: 0
                         rightPadding: 0
                         enabled: root.canSend
+                        // Settings.data is an untyped JsonObject, so qmllint cannot see
+                        // into it; ui.fontDefault is a real Noctalia setting.
+                        // qmllint disable missing-property
                         font.family: Settings.data.ui.fontDefault
+                        // qmllint enable missing-property
                         font.pointSize: Style.fontSizeS * Style.uiScaleRatio
 
                         Keys.onPressed: event => {

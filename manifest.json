@@ -1,7 +1,7 @@
 {
   "id": "slack",
   "name": "Slack",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "minNoctaliaVersion": "4.0.0",
   "author": "lollo",
   "license": "MIT",

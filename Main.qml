@@ -56,6 +56,7 @@ Item {
     property string tokenKind: ""
     property string userTokenHint: ""
     property bool signingIn: false
+    property real _lastSignInPrompt: 0
     property bool haveClientId: false
     property bool haveClientSecret: false
     property bool haveRefreshToken: false
@@ -256,6 +257,24 @@ Item {
         return pluginDir() + "/slack.sh";
     }
 
+    // Slack has rejected the credentials and renewing them is not possible, so
+    // reopen the sign-in instead of leaving a dead sidebar with a red line.
+    function _sessionExpired() {
+        if (root.signingIn)
+            return;
+        if (!root.canSignIn) {
+            root.lastError = "Session expired — add the app's Client ID and Secret in the plugin settings, then sign in from the account chip";
+            return;
+        }
+        // Every failing call reports this, so only act once in a while.
+        const now = Date.now();
+        if (now - root._lastSignInPrompt < 120000)
+            return;
+        root._lastSignInPrompt = now;
+        root.lastError = "Session expired — reopening the Slack sign-in";
+        root.signIn();
+    }
+
     function _parse(text, context) {
         const raw = String(text || "").trim();
         if (raw === "") {
@@ -265,6 +284,8 @@ Item {
         }
         try {
             const res = JSON.parse(raw);
+            if (res.needsSignIn === true)
+                Qt.callLater(root._sessionExpired);
             if (res.ok !== true) {
                 root.lastError = res.error || (context + " failed");
                 return res;
@@ -874,6 +895,7 @@ Item {
                 const res = root._parse(this.text, "sign in");
                 if (!res || res.ok !== true)
                     return;
+                root._lastSignInPrompt = 0;
                 if (res.rotating && !res.refreshStored)
                     root.lastError = "signed in, but Slack sent no refresh token — this token will expire";
                 // Adopt the new identity straight away.

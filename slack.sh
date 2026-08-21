@@ -59,7 +59,26 @@ MAX_PARALLEL=6
 mkdir -p "$STATE_DIR" "$CACHE_DIR" 2>/dev/null
 chmod 700 "$STATE_DIR" "$CACHE_DIR" 2>/dev/null
 
-fail() { jq -n --arg e "$1" '{ok:false, error:$e}'; exit 0; }
+# Set when Slack rejects the credentials and renewing them is not possible, so
+# the UI can offer to sign in again instead of just showing a red line.
+AUTH_DEAD=false
+
+is_auth_error() {
+  case "$1" in
+    token_expired|token_revoked|invalid_auth|account_inactive|not_authed) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# fail <message> [slack-error-code]
+fail() {
+  local needs=false
+  if [[ "$AUTH_DEAD" == true ]] || { [[ -n "${2:-}" ]] && is_auth_error "$2"; }; then
+    needs=true
+  fi
+  jq -n --arg e "$1" --argjson needsSignIn "$needs" '{ok:false, error:$e, needsSignIn:$needsSignIn}'
+  exit 0
+}
 
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing dependency: $1"; }
 need curl; need jq; need secret-tool
@@ -120,7 +139,7 @@ pick_token() {
 user_token_hint() {
   local stored; stored="$(lookup_token user-token)"
   if [[ -n "$stored" ]] && is_rotating "$stored" && [[ -z "$(lookup_token user-refresh-token)" ]]; then
-    printf 'the stored user token rotates (xoxe.) but no refresh token is saved, so it will stop working when it expires — rerun get-user-token.sh'
+    printf 'the stored user token rotates (xoxe.) but no refresh token is saved, so it will stop working when it expires — sign in again from the account chip'
     return
   fi
   if [[ -z "$stored" ]]; then
@@ -234,24 +253,32 @@ api() {
     case "$(jq -r '.error // ""' <<<"$resp")" in
       ratelimited)
         [[ $attempt -eq 1 ]] && { sleep 3; continue; } ;;
-      token_expired|token_revoked|invalid_auth)
+      token_expired|token_revoked|invalid_auth|account_inactive|not_authed)
         # Rotating tokens expire on a timer; renew once and retry the call.
         if [[ $attempt -eq 1 ]] && is_rotating "$TOKEN" && refresh_user_token; then
           continue
-        fi ;;
+        fi
+        # Renewal is impossible (no refresh token, or not a rotating token):
+        # the session is genuinely dead. Drop the cached identity so `me` stops
+        # cheerfully reporting a signed-in user from 24h-old data.
+        AUTH_DEAD=true
+        rm -f "$ME_CACHE" 2>/dev/null ;;
     esac
     printf '%s' "$resp"
     return
   done
 }
 
-# Wrapper that turns a non-ok Slack response into our error shape.
-api_ok() {
-  local resp; resp="$(api "$@")"
-  if [[ "$(jq -r '.ok // false' <<<"$resp")" != "true" ]]; then
-    fail "$(jq -r '.error // "unknown slack error"' <<<"$resp") (${2})"
+# Abort the *script* when a response is not ok. Must run in the caller's shell:
+# calling fail() inside "$(...)" would only exit the subshell.
+require_ok() { # require_ok <response> <method>
+  local resp="$1" method="$2" err
+  [[ "$(jq -r '.ok // false' <<<"$resp")" == "true" ]] && return 0
+  err="$(jq -r '.error // "unknown slack error"' <<<"$resp")"
+  if is_auth_error "$err"; then
+    rm -f "$ME_CACHE" 2>/dev/null
   fi
-  printf '%s' "$resp"
+  fail "$err ($method)" "$err"
 }
 
 fresh() { # fresh <file> <ttl-seconds>
@@ -282,9 +309,12 @@ load_me() {
       <<<"$resp" | atomic_write "$ME_CACHE"
     cat "$ME_CACHE"
   else
-    jq -n --arg e "$(jq -r '.error // "auth.test failed"' <<<"$resp")" --arg kind "$TOKEN_KIND" \
+    local err; err="$(jq -r '.error // "auth.test failed"' <<<"$resp")"
+    local needs=false
+    is_auth_error "$err" && needs=true
+    jq -n --arg e "$err" --arg kind "$TOKEN_KIND" --argjson needsSignIn "$needs" \
       --argjson haveUser "$HAVE_USER" --argjson haveBot "$HAVE_BOT" \
-      '{ok:false, error:$e, tokenKind:$kind, haveUserToken:$haveUser, haveBotToken:$haveBot}'
+      '{ok:false, error:$e, needsSignIn:$needsSignIn, tokenKind:$kind, haveUserToken:$haveUser, haveBotToken:$haveBot}'
   fi
 }
 
@@ -421,7 +451,14 @@ load_conversations() { # load_conversations [force]
     atomic_write "$CONVOS_CACHE" <<<"$out"
     printf '%s' "$out"
   elif [[ -s "$CONVOS_CACHE" ]]; then
-    jq -c --arg e "$(jq -r '.error' <<<"$out")" '.stale = true | .warning = $e' "$CONVOS_CACHE"
+    # Serving the cached list is fine, but if the reason we could not refresh is
+    # that the credentials are dead, say so rather than looking healthy.
+    local err; err="$(jq -r '.error' <<<"$out")"
+    if is_auth_error "$err"; then
+      jq -c --arg e "$err" '.stale = true | .warning = $e | .needsSignIn = true' "$CONVOS_CACHE"
+    else
+      jq -c --arg e "$err" '.stale = true | .warning = $e' "$CONVOS_CACHE"
+    fi
   else
     printf '%s' "$out"
   fi
@@ -462,7 +499,8 @@ collect_user_ids() { jq -c '[ .messages[]? | (.user // empty), ((.reactions // [
 
 cmd_history() {
   local channel="${1:?channel required}" limit="${2:-50}" resp users me
-  resp="$(api_ok GET conversations.history "channel=$channel" "limit=$limit" "inclusive=true")"
+  resp="$(api GET conversations.history "channel=$channel" "limit=$limit" "inclusive=true")"
+  require_ok "$resp" conversations.history
   me="$(me_id)"
   users="$(resolve_users "$(collect_user_ids <<<"$resp")")"
   jq -n \
@@ -475,7 +513,8 @@ cmd_history() {
 
 cmd_replies() {
   local channel="${1:?channel required}" thread="${2:?thread_ts required}" resp users me
-  resp="$(api_ok GET conversations.replies "channel=$channel" "ts=$thread" "limit=100")"
+  resp="$(api GET conversations.replies "channel=$channel" "ts=$thread" "limit=100")"
+  require_ok "$resp" conversations.replies
   me="$(me_id)"
   users="$(resolve_users "$(collect_user_ids <<<"$resp")")"
   jq -n --argjson messages "$(shape_messages "$users" "$me" "$(mine_ids)" <<<"$resp")" --argjson users "$users" \
@@ -511,6 +550,7 @@ cmd_poll() {
     {
       ok: true,
       me: $me,
+      needsSignIn: ([ .[] | .error ] | any(. as $e | ["token_expired","token_revoked","invalid_auth","account_inactive","not_authed"] | index($e) != null)),
       conversations: (
         reduce .[] as $c ({};
           ($cursors[$c.id] // "0") as $cursor

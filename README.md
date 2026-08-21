@@ -73,8 +73,13 @@ token, and `slack.sh` renews it by itself when Slack answers `token_expired` —
 once rather than racing.
 
 If a rotating token is stored *without* a refresh token it works until it
-expires and then stops. The sidebar header says so while that is true, and
-signing in again fixes it.
+expires and then stops. The sidebar header says so while that is true.
+
+When Slack does reject the credentials and renewal is impossible, every
+subcommand reports `needsSignIn: true` and the plugin reopens the sign-in by
+itself (at most once every two minutes). That needs the Client ID and Secret in
+the keyring — without them it cannot re-authenticate unattended, and the header
+says so instead.
 
 ### Bot tokens
 

@@ -11,7 +11,9 @@ the bottom.
 
 Requires **noctalia-shell 4.x** (developed against 4.7.7) and `curl`, `jq`,
 `secret-tool`, `python3`. Optional: `wl-copy` for the copy action, `notify-send`
-for notifications, `openssl` for the sign-in callback's local certificate.
+for notifications, `openssl` for the sign-in callback's local certificate, and a
+C++ compiler (`clang++` or `g++`) for the fast link-preview parser — without one
+the previews fall back to a shell parser.
 
 ```sh
 git clone https://github.com/Bombatomica64/slack-sidebar.git ~/.config/noctalia/plugins/slack
@@ -134,8 +136,9 @@ you have open is polled faster, on its own timer.
 - **Conversation list** — search, unread badges, last-message previews, pin
   toggles. Ordered mentions → unread → pinned → most recent.
 - **Transcript** — grouped consecutive messages, day separators, a "new" marker
-  at your read cursor, reactions (click to toggle), thread reply counts, file
-  links, link unfurls. Hover a message for *reply in thread* and *copy*.
+  at your read cursor, reactions (click to toggle), thread reply counts with the
+  repliers' faces, file links, and link previews. Hover a message for *reply in
+  thread* and *copy*.
 - **Composer** — Enter sends, Shift+Enter adds a line, grows to six lines.
 - **Notifications** — for DMs and mentions, announcing the newest genuinely
   *unread* message (never your own reply sitting on top of it) with the sender's
@@ -143,6 +146,50 @@ you have open is polled faster, on its own timer.
   `~/.cache/noctalia-slack/avatars/` and passed as the `image-path` hint, since
   notification daemons want a real file; the same local files are used in the
   transcript so an avatar cannot pop in late while scrolling.
+
+## Link previews
+
+Slack unfurls some links itself and sends the result in `attachments`; those are
+drawn as-is. Every other `<https://…>` in a message is crawled here:
+`slack.sh unfurl` fetches the page and reads its OpenGraph/Twitter-card
+metadata, mirrors the preview image and favicon into
+`~/.cache/noctalia-slack/unfurl-img/`, and caches the card in
+`~/.cache/noctalia-slack/unfurl/` for a week (six hours for a page that failed,
+so a flaky host is retried but a dead link is not re-fetched every poll). Turn
+it off with **Link previews** in the plugin settings.
+
+What is and is not fetched:
+
+- **http and https only**, and only to a public host. Literal loopback, link-local,
+  private-range and `*.internal`/`*.local` addresses are refused, so a pasted
+  `http://127.0.0.1:8080/shutdown` or a cloud metadata URL is never visited.
+  This is a check on the address as written — it does not defend against a public
+  hostname that resolves to a private one.
+- Redirects are followed at most four times and stay on http(s); the response is
+  capped and the whole fetch times out in twelve seconds.
+- Only the links Slack itself renders as links (its `<…>` entity form) are
+  crawled, at most 24 per call and 3 previews per message.
+- The fetch is a plain unauthenticated GET from your machine, exactly as if you
+  had opened the link — the page learns your IP, and nothing else.
+
+### The HTML parser
+
+Reading metadata out of arbitrary HTML in an unknown encoding is the one part of
+this plugin that is not a good fit for shell: quoted, unquoted and bare
+attributes, comment and `<script>` skipping, entity decoding, cp1252 pages, and
+truncation that does not cut a UTF-8 character in half. `native/unfurl.cpp` does
+it in a single pass — C++26, built with clang (or gcc) at whatever standard the
+toolchain accepts, `c++2c` first:
+
+```sh
+./slack.sh build          # compiles it into ~/.cache/noctalia-slack/bin/
+```
+
+You do not have to run that: the first link preview builds it on demand, and if
+there is no compiler at all `slack.sh` falls back to a grep/sed parser that
+handles the common cases (it misses numeric HTML entities and unusual markup).
+The build is retried only when `unfurl.cpp` changes, so a machine without a
+compiler does not pay for the attempt on every link.
 
 Message text is rendered through `Components/Mrkdwn.js`: mentions, channel
 links, URLs, `*bold*`, `_italic_`, `~strike~`, inline code, fenced blocks,
@@ -163,6 +210,31 @@ blockquotes and `:emoji:`.
 - Shortcodes inside `` `code` `` and fenced blocks are left as text, not
   substituted.
 
+## Scrolling
+
+The transcript is built to hold a steady frame at 120 Hz.
+
+- **The model is diffed, not replaced.** A poll re-delivers the same sixty
+  messages every few seconds; handing a fresh array to a ListView destroys and
+  rebuilds every delegate, which is what used to make the transcript flicker and
+  lose your place. `MessageList.qml` now updates only the rows that actually
+  changed — an unchanged poll does nothing at all.
+- **Delegates are recycled** (`reuseItems`) with about two screenfuls cached
+  either side, so a flick does not have to build a delegate per frame.
+- **Wheel events bypass Flickable's own stepping.** `Components/SmoothList.qml`
+  takes them first: a touchpad's pixel deltas are applied 1:1, and a mouse notch
+  aims a short animation that later notches re-aim rather than restart. Content
+  positions are left sub-pixel, because snapping them to whole pixels quantises
+  the motion.
+- **Message text is rendered once.** Slack mrkdwn is turned into rich text in
+  `Main.qml` and memoised by message text, so a poll only renders what is new,
+  and grouping, day separators and the unread rule are computed with the row
+  rather than in a delegate binding that would be redone on every recycle.
+- **Scroll position is held across updates.** Following the newest message
+  re-arms itself when you scroll back to the bottom, and when older messages
+  fall out of the history window while you are reading, the topmost visible
+  message is pinned where it was instead of jumping.
+
 ## Files
 
 | File | Role |
@@ -173,7 +245,8 @@ blockquotes and `:emoji:`.
 | `Panel.qml` | the sidebar shell and view switching |
 | `BarWidget.qml` | bar entry and unread badge |
 | `Settings.qml` | side, width, intervals, notification toggles |
-| `Components/` | `ConversationList`, `MessageList`, `MessageItem`, `Composer`, `Mrkdwn.js` |
+| `native/unfurl.cpp` | C++26 HTML metadata parser behind the link previews |
+| `Components/` | `ConversationList`, `MessageList`, `MessageItem`, `SmoothList`, `LinkCard`, `Composer`, `Mrkdwn.js` |
 
 `slack.sh` is usable on its own:
 
@@ -190,6 +263,8 @@ blockquotes and `:emoji:`.
 ./slack.sh --token bot me            # force an identity
 ./slack.sh tokens                    # which identities are available
 ./slack.sh emoji                     # sync custom workspace emoji
+./slack.sh unfurl https://example.com/a https://example.com/b
+./slack.sh build                     # compile the link-preview helper
 ./slack.sh avatars                   # mirror profile pictures locally
 ./slack.sh credentials               # is the app able to sign in / renew?
 ./oauth-login.py https://localhost:3000   # the sign-in flow, standalone

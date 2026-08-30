@@ -34,6 +34,8 @@ Item {
     readonly property bool notifyDms: setting("notifyDms", true)
     readonly property bool notifyMentions: setting("notifyMentions", true)
     readonly property bool markReadOnOpen: setting("markReadOnOpen", true)
+    // Crawl the links Slack did not unfurl for us and show a preview card.
+    readonly property bool linkPreviews: setting("linkPreviews", true)
     // With a bot token, auth.test reports the app's id rather than yours. Naming
     // your human account here keeps "mine", unread and @mentions correct.
     readonly property string identityUserId: setting("identityUserId", "")
@@ -103,16 +105,52 @@ Item {
             root.userMap = Object.assign({}, root.userMap, incoming);
     }
 
+    // Rendering a message is the same work every time until its text changes, and
+    // a poll re-delivers the same sixty messages every few seconds. Keyed by the
+    // text itself so an edit misses the cache and everything else hits it.
+    property var _htmlCache: ({})
+    property int _htmlCacheSize: 0
+
     function _render(list) {
         const colors = root.renderColors;
         const users = root.userMap;
         const me = root.meId;
         const custom = root.customEmoji;
+        const cache = root._htmlCache;
+        // A conversation is at most a few hundred distinct messages; past that
+        // the cache is holding onto scrollback nobody is looking at any more.
+        if (root._htmlCacheSize > 2000) {
+            root._htmlCache = ({});
+            root._htmlCacheSize = 0;
+            return _render(list);
+        }
         return (list || []).map(m => {
             const out = m;
-            out.html = Mrkdwn.format(m.text || "", users, me, colors, custom) + (m.edited ? (' <font color="' + colors.muted + '" size="1">(edited)</font>') : "");
+            const key = m.ts + "\u0001" + (m.edited ? "e" : "") + (m.text || "");
+            let hit = cache[key];
+            if (hit === undefined) {
+                hit = {
+                    html: Mrkdwn.format(m.text || "", users, me, colors, custom) + (m.edited ? (' <font color="' + colors.muted + '" size="1">(edited)</font>') : ""),
+                    links: root.linkPreviews ? Mrkdwn.extractLinks(m.text || "") : []
+                };
+                cache[key] = hit;
+                root._htmlCacheSize++;
+            }
+            out.html = hit.html;
+            // Slack already unfurled some of these; crawling them again would
+            // draw the same card twice.
+            out.links = hit.links.filter(url => !root._attachmentCovers(m, url));
+            for (const att of (out.attachments || []))
+                att.previewText = Mrkdwn.preview(att.text || "", users);
             return out;
         });
+    }
+
+    function _attachmentCovers(msg, url) {
+        for (const att of (msg.attachments || []))
+            if (att.url === url || att.fromUrl === url)
+                return true;
+        return false;
     }
 
     // Theme or emoji changes invalidate the cached rich text.
@@ -120,6 +158,8 @@ Item {
     onCustomEmojiChanged: _reRender()
 
     function _reRender() {
+        root._htmlCache = ({});
+        root._htmlCacheSize = 0;
         if (root.activeMessages.length > 0)
             root.activeMessages = _render(root.activeMessages.slice());
         if (root.threadMessages.length > 0)
@@ -141,6 +181,68 @@ Item {
 
     property bool sending: false
     property string sendError: ""
+
+    // ------------------------------------------------------- link previews
+
+    // url -> {url, site, title, description, image, icon}. slack.sh keeps the
+    // real cache on disk; this is only what the visible messages need.
+    property var unfurls: ({})
+    // Links already asked about, whether or not they produced a card. Without
+    // this a page that unfurls to nothing would be re-crawled on every poll.
+    property var _unfurlAsked: ({})
+    property bool _unfurling: false
+
+    function _wantedLinks() {
+        if (!root.linkPreviews)
+            return [];
+        const out = [];
+        const seen = ({});
+        const scan = list => {
+            for (const msg of (list || [])) {
+                for (const url of (msg.links || [])) {
+                    if (seen[url] || root._unfurlAsked[url])
+                        continue;
+                    seen[url] = true;
+                    out.push(url);
+                }
+            }
+        };
+        scan(root.activeMessages);
+        scan(root.threadMessages);
+        return out;
+    }
+
+    function fetchUnfurls() {
+        if (root._unfurling || !root.linkPreviews)
+            return;
+        // One round at a time, oldest first: the rest come on the next tick of
+        // the debounce, so a conversation full of links trickles in rather than
+        // forking twenty curls at once.
+        const wanted = root._wantedLinks().slice(0, 8);
+        if (wanted.length === 0)
+            return;
+        root._unfurling = true;
+        if (!_run(unfurlProc, ["unfurl"].concat(wanted))) {
+            root._unfurling = false;
+            return;
+        }
+        // Marked only once the call is really under way, so a refused start
+        // does not quietly retire the links it was going to ask about.
+        for (const url of wanted)
+            root._unfurlAsked[url] = true;
+    }
+
+    onActiveMessagesChanged: unfurlDebounce.restart()
+    onThreadMessagesChanged: unfurlDebounce.restart()
+
+    Timer {
+        id: unfurlDebounce
+
+        // Long enough that opening a conversation and immediately opening a
+        // thread inside it is one crawl, not two.
+        interval: 350
+        onTriggered: root.fetchUnfurls()
+    }
 
     // Conversation ids the user pinned to the watch list, persisted in settings.
     readonly property var pinned: Array.isArray(cfg.pinned) ? cfg.pinned : []
@@ -493,6 +595,8 @@ Item {
         root.lastError = "";
         root.tokenKind = "";
         root.connected = false;
+        root._htmlCache = ({});
+        root._htmlCacheSize = 0;
 
         refreshIdentity();
         refreshList(true);
@@ -943,6 +1047,31 @@ Item {
         }
         stderr: StdioCollector {}
         onExited: root.joining = false
+    }
+
+    Process {
+        id: unfurlProc
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const res = root._parse(this.text, "link previews");
+                root._unfurling = false;
+                if (!res || res.ok !== true)
+                    return;
+                const found = res.unfurls || ({});
+                let fresh = false;
+                for (const url in found) {
+                    if (!root.unfurls[url])
+                        fresh = true;
+                }
+                if (fresh)
+                    root.unfurls = Object.assign({}, root.unfurls, found);
+                // More links than one round could take: come back for them.
+                if (root._wantedLinks().length > 0)
+                    unfurlDebounce.restart();
+            }
+        }
+        stderr: StdioCollector {}
+        onExited: root._unfurling = false
     }
 
     Process {

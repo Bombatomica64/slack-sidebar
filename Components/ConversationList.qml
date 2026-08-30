@@ -59,13 +59,15 @@ Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
-            NListView {
+            SmoothList {
                 id: list
                 anchors.fill: parent
                 anchors.margins: Style.marginXS
                 model: root.visibleConversations
                 spacing: Style.marginXXS
-                showGradientMasks: false
+                // Rows here are fixed-height and cheap, so a smaller buffer is
+                // plenty; the win is the same wheel handling as the transcript.
+                cacheBuffer: 900
 
                 delegate: Rectangle {
                     id: row

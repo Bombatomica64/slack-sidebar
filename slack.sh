@@ -50,11 +50,21 @@ while [[ "${1:-}" == --* ]]; do
 done
 
 API="https://slack.com/api"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/noctalia-slack"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/noctalia-slack"
 CONVOS_TTL=3600
 ME_TTL=86400
 MAX_PARALLEL=6
+# Link previews are shared by both identities — a page's title does not depend
+# on which token asked for it — so they live outside the per-identity caches.
+UNFURL_DIR="$CACHE_DIR/unfurl"
+UNFURL_ASSETS="$CACHE_DIR/unfurl-img"
+UNFURL_TTL=604800        # a good page: a week
+UNFURL_FAIL_TTL=21600    # a 404 or a timeout: retry in six hours
+UNFURL_MAX_BYTES=1048576
+ASSET_MAX_BYTES=4000000
+UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 
 mkdir -p "$STATE_DIR" "$CACHE_DIR" 2>/dev/null
 chmod 700 "$STATE_DIR" "$CACHE_DIR" 2>/dev/null
@@ -486,11 +496,22 @@ shape_messages() {
       edited: (.edited != null),
       threadTs: (.thread_ts // ""),
       replyCount: (.reply_count // 0),
-      replyUsers: [ (.reply_users // [])[] | ($users[.].image // "") ] ,
+      replyUsers: [ (.reply_users // [])[] ],
       isBot: ((.bot_id // "") != "" and (.user // "") == ""),
       reactions: [ (.reactions // [])[] | {name: .name, count: .count, mine: ([ (.users // [])[] ] | any(. as $u | ($mine | index($u)) != null))} ],
       files: [ (.files // [])[] | {name: (.name // .title // "file"), url: (.permalink // ""), type: (.filetype // "")} ],
-      attachments: [ (.attachments // [])[] | {title: (.title // ""), text: (.text // .fallback // ""), url: (.title_link // "")} ]
+      attachments: [ (.attachments // [])[] | {
+        title: (.title // ""),
+        text: (.text // .fallback // ""),
+        url: (.title_link // .original_url // .from_url // ""),
+        fromUrl: (.from_url // .original_url // ""),
+        site: (.service_name // ""),
+        siteIcon: (.service_icon // ""),
+        author: (.author_name // ""),
+        image: (.image_url // .thumb_url // ""),
+        footer: (.footer // ""),
+        color: (.color // "")
+      } ]
     }
   ]'
 }
@@ -712,6 +733,296 @@ cmd_avatars() {
   }'
 }
 
+# ---------------------------------------------------------- link previews
+
+# A message full of links must not become a message full of processes, and a
+# preview must never become a way to make this machine fetch something it
+# should not. Everything below is built around those two rules.
+
+UNFURL_BIN="$CACHE_DIR/bin/slack-unfurl"
+UNFURL_SRC="$SCRIPT_DIR/native/unfurl.cpp"
+UNFURL_BUILD_LOG="$CACHE_DIR/bin/build.log"
+
+# Built on demand rather than at install time: the plugin is cloned, not
+# packaged, and a compiler is not a dependency — when there is none, or the
+# build fails, the shell fallback below still produces a card.
+build_unfurl_helper() {
+  [[ -f "$UNFURL_SRC" ]] || return 1
+  mkdir -p "$CACHE_DIR/bin" 2>/dev/null || return 1
+  local cxx std tmp="$UNFURL_BIN.$$"
+  for cxx in clang++ g++ c++; do
+    command -v "$cxx" >/dev/null 2>&1 || continue
+    # C++26 is what the source targets; the older standards are only there so a
+    # 2023-vintage toolchain still gets the fast parser.
+    for std in c++2c c++23 c++2b c++20; do
+      if "$cxx" "-std=$std" -O2 -o "$tmp" "$UNFURL_SRC" >>"$UNFURL_BUILD_LOG" 2>&1; then
+        mv -f "$tmp" "$UNFURL_BIN" && return 0
+      fi
+    done
+  done
+  rm -f "$tmp" 2>/dev/null
+  return 1
+}
+
+# Rebuild when the source is newer than the binary; remember a failure against
+# the source's timestamp so a machine with no compiler does not retry the build
+# on every single link.
+ensure_unfurl_helper() {
+  [[ -x "$UNFURL_BIN" && ! "$UNFURL_SRC" -nt "$UNFURL_BIN" ]] && return 0
+  local marker="$CACHE_DIR/bin/.build-failed"
+  if [[ -f "$marker" && ! "$UNFURL_SRC" -nt "$marker" ]]; then
+    return 1
+  fi
+  if build_unfurl_helper; then
+    rm -f "$marker" 2>/dev/null
+    return 0
+  fi
+  mkdir -p "$CACHE_DIR/bin" 2>/dev/null
+  : >"$marker" 2>/dev/null
+  return 1
+}
+
+hash_of() { # hash_of <string>
+  if command -v sha1sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha1sum | cut -c1-40
+  elif command -v md5sum >/dev/null 2>&1; then
+    printf '%s' "$1" | md5sum | cut -c1-32
+  else
+    printf '%s' "$1" | cksum | tr -d ' '
+  fi
+}
+
+# Only public http(s) may be crawled. A colleague pasting
+# http://127.0.0.1:8080/shutdown must not make this machine visit it, and the
+# same goes for cloud metadata endpoints and anything on the LAN.
+url_is_crawlable() { # url_is_crawlable <url>
+  local url="$1" rest host
+  case "$url" in
+    http://*)  rest="${url#http://}" ;;
+    https://*) rest="${url#https://}" ;;
+    *) return 1 ;;
+  esac
+  host="${rest%%/*}"; host="${host%%\?*}"; host="${host%%#*}"
+  host="${host##*@}"          # strip userinfo
+  host="${host%%:*}"          # strip port (IPv6 literals are rejected below anyway)
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  [[ -n "$host" ]] || return 1
+  case "$host" in
+    localhost|*.localhost|*.local|*.internal|*.home.arpa|*.onion) return 1 ;;
+    127.*|10.*|0.*|169.254.*|192.168.*|100.64.*) return 1 ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 1 ;;
+    metadata.google.internal|instance-data|*\[*) return 1 ;;
+  esac
+  # A bare number or an IPv6 literal without brackets: not a hostname we trust.
+  [[ "$host" == *.* ]] || return 1
+  return 0
+}
+
+# Pull the fields out of an HTML page with grep/sed when the compiled helper is
+# unavailable. Deliberately modest — first match wins, only the entities that
+# actually show up in titles are decoded — but it keeps previews working on a
+# machine with no compiler.
+unfurl_fallback() { # unfurl_fallback <url> <final-url> <body-file>
+  local url="$1" final="$2" file="$3" head
+  # Comments first: a page that keeps an old <meta> commented out would
+  # otherwise win, because grep cannot see that it is commented out.
+  head="$(head -c 262144 "$file" | tr '\n' ' ' | sed -E ':a; s/<!--[^-]*(-[^-]+)*-->//g; ta')"
+  local title='' desc='' image='' site=''
+  _meta() { # _meta <property-or-name>
+    printf '%s' "$head" \
+      | grep -o -i -E "<meta[^>]+(property|name)=[\"']?$1[\"']?[^>]*>" \
+      | head -n1 \
+      | grep -o -i -E "content=\"[^\"]*\"|content='[^']*'|content=[^ >]+" \
+      | head -n1 | sed -E "s/^content=[\"']?//; s/[\"']$//"
+  }
+  title="$(_meta 'og:title')"
+  [[ -z "$title" ]] && title="$(_meta 'twitter:title')"
+  [[ -z "$title" ]] && title="$(printf '%s' "$head" | grep -o -i -E '<title[^>]*>[^<]*' | head -n1 | sed -E 's/^<title[^>]*>//')"
+  desc="$(_meta 'og:description')"
+  [[ -z "$desc" ]] && desc="$(_meta 'description')"
+  image="$(_meta 'og:image')"
+  site="$(_meta 'og:site_name')"
+  unset -f _meta
+
+  local decode='s/&amp;/\&/g; s/&quot;/"/g; s/&#0*39;/'"'"'/g; s/&apos;/'"'"'/g; s/&lt;/</g; s/&gt;/>/g; s/&nbsp;/ /g; s/&hellip;/…/g; s/&mdash;/—/g; s/&ndash;/–/g; s/&#8217;/’/g; s/&#8216;/‘/g'
+  title="$(printf '%s' "$title" | sed -E "$decode" | tr -s ' ' | sed -E 's/^ +| +$//g' | cut -c1-300)"
+  desc="$(printf '%s' "$desc" | sed -E "$decode" | tr -s ' ' | sed -E 's/^ +| +$//g' | cut -c1-600)"
+  # Resolve the relative-URL shapes that actually occur; anything cleverer is
+  # what the compiled helper is for.
+  local scheme_host; scheme_host="$(printf '%s' "$final" | sed -E 's#^(https?://[^/]+).*#\1#')"
+  case "$image" in
+    ''|http://*|https://*) ;;
+    //*) image="${final%%:*}:$image" ;;
+    /*)  image="$scheme_host$image" ;;
+    *)   image="${final%/*}/$image" ;;
+  esac
+  [[ -z "$site" ]] && site="$(printf '%s' "$scheme_host" | sed -E 's#^https?://##; s/^www\.//')"
+
+  jq -n --arg url "$url" --arg final "$final" --arg title "$title" --arg desc "$desc" \
+        --arg image "$image" --arg site "$site" \
+    '{ok:true, url:$url, finalUrl:$final, canonical:$final, site:$site, title:$title,
+      description:$desc, image:$image, icon:"", kind:""}'
+}
+
+# Mirror a preview image next to the JSON. Qt loads a remote image happily
+# enough, but a local file cannot pop in late while the transcript scrolls, and
+# it costs nothing on the second read of the same conversation.
+mirror_asset() { # mirror_asset <url> -> prints local path, or nothing
+  local url="$1" key target ctype
+  [[ -n "$url" ]] || return 0
+  url_is_crawlable "$url" || return 0
+  key="$(hash_of "$url")"
+  mkdir -p "$UNFURL_ASSETS" 2>/dev/null
+  # Already mirrored under any extension?
+  local existing
+  existing="$(find "$UNFURL_ASSETS" -maxdepth 1 -name "$key.*" -size +0c 2>/dev/null | head -n1)"
+  if [[ -n "$existing" ]]; then printf '%s' "$existing"; return 0; fi
+
+  target="$UNFURL_ASSETS/$key.part"
+  ctype="$(curl -sS -L --max-redirs 3 --max-time 15 --connect-timeout 6 \
+      --proto '=http,https' --proto-redir '=http,https' \
+      --max-filesize "$ASSET_MAX_BYTES" -A "$UA" \
+      -o "$target" -w '%{content_type}' "$url" 2>/dev/null)" || { rm -f "$target"; return 0; }
+  [[ -s "$target" ]] || { rm -f "$target"; return 0; }
+
+  local ext
+  case "$(printf '%s' "$ctype" | tr '[:upper:]' '[:lower:]')" in
+    *png*)  ext=png ;;
+    *jpeg*|*jpg*) ext=jpg ;;
+    *gif*)  ext=gif ;;
+    *webp*) ext=webp ;;
+    *svg*)  ext=svg ;;
+    *avif*) ext=avif ;;
+    *icon*|*ico*) ext=ico ;;
+    *) rm -f "$target"; return 0 ;;   # not an image: do not hand the UI a web page to draw
+  esac
+  mv -f "$target" "$UNFURL_ASSETS/$key.$ext" 2>/dev/null || { rm -f "$target"; return 0; }
+  printf '%s' "$UNFURL_ASSETS/$key.$ext"
+}
+
+# Crawl one URL into $UNFURL_DIR/<hash>.json. Runs in a subshell per URL, so it
+# reports failure by writing a card rather than by exit status.
+unfurl_one() { # unfurl_one <url> <cache-file>
+  local url="$1" out="$2" tmp hdr body info ctype final code
+  if ! url_is_crawlable "$url"; then
+    jq -n --arg url "$url" '{ok:false, url:$url, error:"not crawlable"}' >"$out"
+    return 0
+  fi
+
+  tmp="$(mktemp -d)" || return 0
+  hdr="$tmp/h"; body="$tmp/b"
+  info="$(curl -sS -L --max-redirs 4 --max-time 12 --connect-timeout 6 \
+      --proto '=http,https' --proto-redir '=http,https' --compressed \
+      --max-filesize 8000000 \
+      -A "$UA" \
+      -H 'Accept: text/html,application/xhtml+xml;q=0.9,*/*;q=0.5' \
+      -H 'Accept-Language: en;q=0.9' \
+      -D "$hdr" -o "$body" \
+      -w '%{content_type}\n%{url_effective}\n%{http_code}' "$url" 2>/dev/null)"
+
+  ctype="$(sed -n 1p <<<"$info" | tr '[:upper:]' '[:lower:]')"
+  final="$(sed -n 2p <<<"$info")"
+  code="$(sed -n 3p <<<"$info")"
+  [[ -n "$final" ]] || final="$url"
+
+  if [[ -z "$code" || "$code" == "000" || "$code" -ge 400 ]]; then
+    jq -n --arg url "$url" --arg c "${code:-000}" '{ok:false, url:$url, error:("http " + $c)}' >"$out"
+    rm -rf "$tmp"; return 0
+  fi
+
+  case "$ctype" in
+    *text/html*|*application/xhtml*|"")
+      local card=""
+      if ensure_unfurl_helper; then
+        card="$(head -c "$UNFURL_MAX_BYTES" "$body" | "$UNFURL_BIN" "$url" "$final" 2>/dev/null)"
+      fi
+      if [[ -z "$card" ]] || ! jq -e . >/dev/null 2>&1 <<<"$card"; then
+        card="$(unfurl_fallback "$url" "$final" "$body")"
+      fi
+      # Mirror the preview image and the favicon, then rewrite the card to point
+      # at the local copies (keeping the remote URL for the "open" action).
+      local img icon localimg="" localicon=""
+      img="$(jq -r '.image // ""' <<<"$card")"
+      icon="$(jq -r '.icon // ""' <<<"$card")"
+      localimg="$(mirror_asset "$img")"
+      localicon="$(mirror_asset "$icon")"
+      jq -c --arg li "$localimg" --arg lc "$localicon" \
+        '. + {imageFile:$li, iconFile:$lc, fetchedAt:(now|floor)}' <<<"$card" >"$out"
+      ;;
+    image/*)
+      # A bare image link: Slack shows the picture, and so do we.
+      local localimg=""; localimg="$(mirror_asset "$final")"
+      jq -n --arg url "$url" --arg final "$final" --arg li "$localimg" \
+        '{ok:true, url:$url, finalUrl:$final, canonical:$final, site:($final | sub("^https?://";"") | sub("/.*$";"") | sub("^www\\.";"")),
+          title:"", description:"", image:$final, icon:"", imageFile:$li, iconFile:"", kind:"image", fetchedAt:(now|floor)}' >"$out"
+      ;;
+    *)
+      jq -n --arg url "$url" --arg t "$ctype" '{ok:false, url:$url, error:("not a page: " + $t)}' >"$out"
+      ;;
+  esac
+  rm -rf "$tmp"
+  return 0
+}
+
+# unfurl <url> [url ...] -> {ok:true, unfurls:{url: card}}
+cmd_unfurl() {
+  mkdir -p "$UNFURL_DIR" "$UNFURL_ASSETS" 2>/dev/null
+  local urls=() url key file n=0
+  for url in "$@"; do
+    [[ -n "$url" ]] && urls+=("$url")
+  done
+  if (( ${#urls[@]} == 0 )); then
+    jq -n '{ok:true, unfurls:{}}'
+    return
+  fi
+  # Slack unfurls a handful of links per message, not a hundred; the cap is what
+  # stops one pasted wall of text from spawning a crawl storm.
+  (( ${#urls[@]} > 24 )) && urls=("${urls[@]:0:24}")
+
+  local wanted=()
+  for url in "${urls[@]}"; do
+    key="$(hash_of "$url")"
+    file="$UNFURL_DIR/$key.json"
+    if [[ -s "$file" ]]; then
+      local ttl="$UNFURL_TTL"
+      [[ "$(jq -r '.ok // false' "$file" 2>/dev/null)" == "true" ]] || ttl="$UNFURL_FAIL_TTL"
+      fresh "$file" "$ttl" && continue
+    fi
+    wanted+=("$url")
+  done
+
+  if (( ${#wanted[@]} > 0 )); then
+    for url in "${wanted[@]}"; do
+      unfurl_one "$url" "$UNFURL_DIR/$(hash_of "$url").json" &
+      (( ++n % MAX_PARALLEL == 0 )) && wait
+    done
+    wait
+  fi
+
+  # Assemble only what was asked for, keyed by the URL as the caller wrote it.
+  local files=()
+  for url in "${urls[@]}"; do
+    file="$UNFURL_DIR/$(hash_of "$url").json"
+    [[ -s "$file" ]] && files+=("$file")
+  done
+  if (( ${#files[@]} == 0 )); then
+    jq -n '{ok:true, unfurls:{}}'
+    return
+  fi
+  jq -s -c '{ok:true, unfurls: (reduce .[] as $c ({};
+      if ($c.ok // false) and (($c.title // "") != "" or ($c.description // "") != "" or ($c.imageFile // "") != "")
+      then .[$c.url] = {
+             url: ($c.canonical // $c.url),
+             site: ($c.site // ""),
+             title: ($c.title // ""),
+             description: ($c.description // ""),
+             image: ($c.imageFile // ""),
+             icon: ($c.iconFile // ""),
+             kind: ($c.kind // "")
+           }
+      else . end))}' "${files[@]}"
+}
+
 # Joining is a visible act in the channel, so the UI asks first rather than
 # doing it implicitly when you click a channel you are not in.
 cmd_join() {
@@ -751,9 +1062,17 @@ case "${1:-}" in
   join)      cmd_join "${2:-}" ;;
   emoji)     cmd_emoji ;;
   avatars)   cmd_avatars ;;
+  unfurl)    shift; cmd_unfurl "$@" ;;
+  build)     # Compile the link-preview helper up front instead of on first use.
+             if ensure_unfurl_helper; then
+               jq -n --arg bin "$UNFURL_BIN" '{ok:true, helper:$bin}'
+             else
+               jq -n --arg log "$UNFURL_BUILD_LOG" \
+                 '{ok:false, error:("could not build the link-preview helper — link previews fall back to the shell parser; see " + $log)}'
+             fi ;;
   sync-read) cmd_sync_read "${2:-}" ;;
   users)     jq -n --argjson u "$(users_cache_read)" '{ok:true, users:$u}' ;;
-  reset)     rm -f "$CONVOS_CACHE" "$USERS_CACHE" "$ME_CACHE"; jq -n '{ok:true}' ;;
+  reset)     rm -f "$CONVOS_CACHE" "$USERS_CACHE" "$ME_CACHE"; rm -rf "$UNFURL_DIR"; jq -n '{ok:true}' ;;
   tokens)    jq -n --argjson u "$HAVE_USER" --argjson b "$HAVE_BOT" --arg active "$TOKEN_KIND" \
                '{ok:true, haveUserToken:$u, haveBotToken:$b, active:$active}' ;;
   set-credentials)
@@ -770,5 +1089,5 @@ case "${1:-}" in
                --argjson secret "$([[ -n "$(secret-tool lookup service slack-agents account client-secret 2>/dev/null)" ]] && echo true || echo false)" \
                --argjson refresh "$([[ -n "$(lookup_token user-refresh-token)" ]] && echo true || echo false)" \
                '{ok:true, haveClientId:$id, haveClientSecret:$secret, haveRefreshToken:$refresh}' ;;
-  *)         fail "usage: slack.sh [--token user|bot|auto] [--me <userId>] {me|list|poll|history|replies|send|read|react|join|emoji|avatars|sync-read|users|tokens|credentials|set-credentials|reset}" ;;
+  *)         fail "usage: slack.sh [--token user|bot|auto] [--me <userId>] {me|list|poll|history|replies|send|read|react|join|emoji|avatars|unfurl|build|sync-read|users|tokens|credentials|set-credentials|reset}" ;;
 esac

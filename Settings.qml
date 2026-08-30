@@ -27,6 +27,7 @@ ColumnLayout {
     property bool editNotifyDms: initial("notifyDms", true)
     property bool editNotifyMentions: initial("notifyMentions", true)
     property bool editMarkReadOnOpen: initial("markReadOnOpen", true)
+    property bool editLinkPreviews: initial("linkPreviews", true)
 
     spacing: Style.marginM
 
@@ -198,6 +199,15 @@ ColumnLayout {
         onToggled: checked => root.editMarkReadOnOpen = checked
     }
 
+    NToggle {
+        Layout.fillWidth: true
+        label: "Link previews"
+        description: "Crawl links Slack did not unfurl and show a preview card. Pages are fetched directly from your machine, cached for a week, and only ever over http(s) to a public address."
+        checked: root.editLinkPreviews
+        defaultValue: root.defaults.linkPreviews
+        onToggled: checked => root.editLinkPreviews = checked
+    }
+
     NText {
         Layout.fillWidth: true
         text: root.credentialsStored ? "Credentials stored — use “Sign in with Slack” from the account chip in the sidebar." : "Add the Client ID and Secret above, save, then use “Sign in with Slack” from the account chip in the sidebar."
@@ -261,6 +271,7 @@ ColumnLayout {
         pluginApi.pluginSettings.notifyDms = root.editNotifyDms;
         pluginApi.pluginSettings.notifyMentions = root.editNotifyMentions;
         pluginApi.pluginSettings.markReadOnOpen = root.editMarkReadOnOpen;
+        pluginApi.pluginSettings.linkPreviews = root.editLinkPreviews;
         pluginApi.saveSettings();
     }
 }

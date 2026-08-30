@@ -40,22 +40,32 @@ endif
 CXX_IS_CLANG := $(shell $(CXX) --version 2>/dev/null | grep -qi clang && echo 1)
 CXX_MAJOR    := $(firstword $(subst ., ,$(shell $(CXX) -dumpfullversion -dumpversion 2>/dev/null)))
 
-# Our own code is C++20 named modules, and module support is where the compilers
-# most recently grew up. This build is clang-only, and not by preference:
+# Our own code is C++20 named modules, with Qt included in each module's global
+# module fragment. That combination builds on clang and on no other compiler,
+# and the reason changed as the measurements came in:
 #
 #   gcc 13  segfaults compiling a four-line program that imports a module and
-#           uses std::string at -O2. It is still the default on Ubuntu 24.04 LTS.
-#   gcc 14  ICEs on this code under every flag combination tried - in
-#           gen_enumeration_type_die (dwarf2out.cc) with debug info, and in
-#           nothrow_spec_p (cp/except.cc) without it.
-#   gcc 15  also fails, measured: 15.3.0 against Qt 6.8.2 in CI's gcc:15
-#           container. Modules plus Qt headers of this size is more than gcc's
-#           implementation handles, and it is not a matter of waiting one
-#           release.
+#           uses std::string at -O2. Still the default on Ubuntu 24.04 LTS.
+#   gcc 14  ICEs on this code with and without debug info -
+#           gen_enumeration_type_die (dwarf2out.cc), nothrow_spec_p (cp/except.cc).
+#   gcc 15  fails; 15.3.0 against Qt 6.8.2, measured in CI.
+#   gcc 16  does not crash. It *diagnoses*, and it is right to:
 #
-# CI re-asks on every push (the gcc-modules-probe job), so the day this stops
-# being true it says so. ALLOW_GCC=1 lifts the gate for anyone who wants to try
-# a newer gcc themselves, rather than making that a patch.
+#             qbytearrayalgorithms.h:80: error: 'QtPrivate::toIntegral<...>'
+#             exposes TU-local entity '...::<lambda()>'
+#
+# That is [basic.link]/17: a module interface may not expose a TU-local entity,
+# and a lambda in the global module fragment is one. Qt's headers are full of
+# them. So the honest statement is not "gcc cannot compile modules" - it is that
+# putting Qt in a module's global module fragment is ill-formed, gcc 16 is the
+# first compiler to enforce it, and clang has no such check at all (verified:
+# clang 18 accepts a minimal repro silently and has no flag to turn it on).
+#
+# This build therefore rests on clang's leniency rather than on being correct.
+# The fix, if it is ever wanted, is to keep Qt out of module interface units
+# entirely - which means the Qt-facing code stops being modules. Until then the
+# probe job watches, and ALLOW_GCC=1 lifts the gate for anyone who wants to
+# retry gcc themselves.
 ifeq ($(CXX_IS_CLANG),1)
   CXX_MIN := 17
 else
@@ -63,7 +73,8 @@ else
   ifneq ($(ALLOW_GCC),1)
     ifneq ($(shell test "$(CXX_MAJOR)" -ge 15 2>/dev/null && echo ok),ok)
       $(error $(CXX) is gcc $(CXX_MAJOR), which cannot compile C++20 modules against Qt - \
-        gcc 13 segfaults and gcc 14 hits an internal compiler error. Use `make CXX=clang++` \
+        13 and 14 crash, 16 correctly rejects Qt's headers for exposing TU-local \
+        entities from a module interface. Use `make CXX=clang++` \
         (clang 17 or newer). ALLOW_GCC=1 tries anyway. Each release also ships a prebuilt \
         binary, if building is not an option.)
     endif

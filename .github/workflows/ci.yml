@@ -129,7 +129,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gcc15-build-log
+          name: gcc-probe-build-log
           path: gcc15.log
           if-no-files-found: ignore
 

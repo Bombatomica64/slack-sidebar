@@ -266,11 +266,28 @@ That costs a compiler floor, and the floor turned out to be **clang only**:
 | clang 17+ | works |
 | gcc 13 | *segfaults* compiling a four-line program that imports a module and uses `std::string` at `-O2`. Still the default on Ubuntu 24.04 LTS. |
 | gcc 14 | internal compiler error on this code under every flag combination tried — `gen_enumeration_type_die` (dwarf2out.cc) with debug info, `nothrow_spec_p` (cp/except.cc) without it |
-| gcc 15 | also fails — 15.3.0 against Qt 6.8.2, measured in CI |
-| gcc 16 | the probe now tracks `gcc:latest`, so the newest release is retried on every push |
+| gcc 15 | fails — 15.3.0 against Qt 6.8.2, measured in CI |
+| gcc 16 | **does not crash — it diagnoses**, and it is right to |
 
-Modules plus Qt headers of this size is more than gcc's implementation handles,
-and gcc 15 shows it is not a matter of waiting one release. CI keeps asking
+That last one changes the diagnosis. gcc 16.2.0 says:
+
+```
+qbytearrayalgorithms.h:80: error: 'QtPrivate::toIntegral<...>'
+  exposes TU-local entity '...::<lambda()>'
+```
+
+which is [basic.link]/17: a module interface may not expose a TU-local entity,
+and a lambda in the global module fragment is one. Qt's headers are full of
+them. So the honest statement is **not** "gcc cannot compile modules" — it is
+that **putting Qt in a module's global module fragment is ill-formed**, gcc 16
+is the first compiler to enforce it, and clang has no such check at all (clang
+18 accepts a minimal repro silently, and has no flag to turn one on).
+
+This build therefore rests on clang's leniency rather than on being correct. It
+works, and will keep working until clang implements that rule. The fix, if it is
+ever wanted, is to keep Qt out of module interface units entirely — which means
+the Qt-facing code stops being modules and goes back to headers and sources,
+leaving `html.cppm` (which touches no Qt, and conforms) as the only module. CI keeps asking
 anyway: the non-blocking `gcc-modules-probe` job builds in the official
 `gcc:latest` container with `ALLOW_GCC=1` (which lifts the Makefile's gate) and
 writes the verdict, with the version it actually got, into the run summary. It

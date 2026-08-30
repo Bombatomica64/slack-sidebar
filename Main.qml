@@ -249,7 +249,14 @@ Item {
     // Conversation ids the user pinned to the watch list, persisted in settings.
     readonly property var pinned: Array.isArray(cfg.pinned) ? cfg.pinned : []
 
-    property var _prevUnread: ({})
+    // The newest unread message already announced, per conversation, keyed by
+    // timestamp. It used to be keyed by unread count - "notify when the count
+    // goes up" - which quietly stopped working: poll reads the newest 20
+    // messages per conversation, so the count saturates at 20, and a
+    // conversation left unread for a while reports 20 forever. The count never
+    // rises again and the notifications stop, which is exactly what it looked
+    // like from the outside.
+    property var _notifiedTs: ({})
     property bool _seenFirstPoll: false
 
     // Assigning a fresh array to a ListView model rebuilds every delegate, which
@@ -628,7 +635,7 @@ Item {
         root.conversations = [];
         root.pollState = ({});
         root.userMap = ({});
-        root._prevUnread = ({});
+        root._notifiedTs = ({});
         root._seenFirstPoll = false;
         root.activeId = "";
         root.activeMessages = [];
@@ -726,22 +733,36 @@ Item {
     }
 
     function _notifyForPoll(next) {
-        if (!root._seenFirstPoll) {
-            root._seenFirstPoll = true;
-            return;
-        }
+        // The first poll of a session describes what was already waiting. That
+        // is not news, so it is recorded and not announced.
+        const firstPoll = !root._seenFirstPoll;
+        root._seenFirstPoll = true;
+
+        const seen = ({});
         for (const id in next) {
             const st = next[id];
-            const before = root._prevUnread[id] || 0;
-            if ((st.unread || 0) <= before)
+            const msg = st.latestUnread;
+            const prior = root._notifiedTs[id];
+
+            if (!msg) {
+                // Nothing unread: keep what we knew, so an older message can
+                // never come back around and announce itself.
+                if (prior !== undefined)
+                    seen[id] = prior;
+                continue;
+            }
+            seen[id] = msg.ts;
+
+            // Announced regardless of the unread count, which is capped and
+            // therefore not a signal. `latestUnread` is the newest genuinely
+            // unread message - never your own reply sitting on top of it.
+            if (firstPoll || (prior !== undefined && parseFloat(msg.ts) <= parseFloat(prior)))
                 continue;
             if (id === root.activeId)
                 continue;
-            // Announce the newest genuinely unread message. `latest` can be your
-            // own reply sitting on top of it, which is what used to get reported.
-            const msg = st.latestUnread;
-            if (!msg || root._isMe(msg.user))
+            if (root._isMe(msg.user))
                 continue;
+
             let conv = null;
             for (const c of root.conversations)
                 if (c.id === id)
@@ -751,11 +772,13 @@ Item {
             const wanted = ((isDm || isGroupDm) && root.notifyDms) || (st.mention && root.notifyMentions);
             if (!wanted)
                 continue;
+
             const where = conv ? (isDm ? conv.name : "#" + conv.name) : id;
             // In a 1:1 the title already names the sender.
             const body = isDm ? msg.text : (msg.author + ": " + msg.text);
             root.notify(where, body, root.avatarMap[msg.user] || "");
         }
+        root._notifiedTs = seen;
     }
 
     // ----------------------------------------------------------- startup
@@ -934,10 +957,6 @@ Item {
                     return;
                 const next = res.conversations || ({});
                 root._notifyForPoll(next);
-                const prev = ({});
-                for (const id in next)
-                    prev[id] = next[id].unread || 0;
-                root._prevUnread = prev;
                 root.pollState = next;
                 root.lastUpdate = new Date().toLocaleTimeString(Qt.locale(), "HH:mm:ss");
             }

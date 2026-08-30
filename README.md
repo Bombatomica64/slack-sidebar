@@ -233,6 +233,7 @@ It is part of `slack-agent`, so it is built with everything else.
 make                 # build the helper into build/
 make test            # unit tests
 make fuzz            # fuzz the parser (clang only; FUZZ_TIME=300 for longer)
+make coverage        # what the tests reach, and what they do not
 make check           # what CI gates on: strict warnings, tests, sanitizers, QML parse
 make install         # install the agent where the plugin looks for it
 make print-config    # which compiler, standard and version were chosen
@@ -266,13 +267,16 @@ That costs a compiler floor, and the floor turned out to be **clang only**:
 | gcc 13 | *segfaults* compiling a four-line program that imports a module and uses `std::string` at `-O2`. Still the default on Ubuntu 24.04 LTS. |
 | gcc 14 | internal compiler error on this code under every flag combination tried — `gen_enumeration_type_die` (dwarf2out.cc) with debug info, `nothrow_spec_p` (cp/except.cc) without it |
 | gcc 15 | also fails — 15.3.0 against Qt 6.8.2, measured in CI |
+| gcc 16 | the probe now tracks `gcc:latest`, so the newest release is retried on every push |
 
 Modules plus Qt headers of this size is more than gcc's implementation handles,
 and gcc 15 shows it is not a matter of waiting one release. CI keeps asking
-anyway: the non-blocking `gcc-modules-probe` job builds in the official `gcc:15`
-container with `ALLOW_GCC=1` (which lifts the Makefile's gate) and writes the
-verdict into the run summary, so the day this stops being true it says so
-rather than nobody noticing. The gcc module build rules are kept for that day.
+anyway: the non-blocking `gcc-modules-probe` job builds in the official
+`gcc:latest` container with `ALLOW_GCC=1` (which lifts the Makefile's gate) and
+writes the verdict, with the version it actually got, into the run summary. It
+tracks `latest` rather than a pinned major precisely so it cannot go quietly
+stale — the first version of this job was pinned to 15 and was already a release
+behind. The gcc module build rules are kept for that day.
 
 Three consequences worth knowing:
 
@@ -303,6 +307,34 @@ exported functions in these modules are deliberately **not `inline`**. An
 exported inline function may not name a TU-local entity, and most of them call
 helpers from an anonymous namespace; each module is a single translation unit,
 so `inline` was buying nothing anyway. gcc diagnoses this, clang does not.
+
+### Coverage
+
+`make coverage` builds both test binaries with clang's source-based
+instrumentation, runs them, and prints llvm-cov's table followed by the list of
+modules under `COVERAGE_FLOOR` (25%) line coverage. A line-by-line HTML report
+lands in `build/cov/html/`. CI runs it on every push and puts the table in the
+run summary.
+
+Nothing fails for a low number — the point is that the gap is visible and
+therefore a decision. As it stands the parser is well covered and most of the
+agent is not:
+
+| | line coverage |
+| --- | --- |
+| `html.cppm` | 94% |
+| `util.cppm` | 33% |
+| `commands.cppm` | 8% |
+| `api.cppm` | 7% |
+| `net.cppm` | 5% |
+| `store.cppm` | 1% |
+| `keyring.cppm`, `oauth.cppm` | 0% |
+
+Most of that is honest: those modules are mostly HTTP calls, keyring access and
+an OAuth flow, none of which belong in a unit test. What *was* worth testing is
+the pure logic, and `native/tests/agent_test.cpp` now covers it — the address
+guard especially, which is the piece deciding whether this machine fetches a URL
+somebody pasted into a chat.
 
 ### Fuzzing
 
@@ -341,6 +373,7 @@ machine does not.
 | `gcc-modules-probe` | **non-blocking.** Installs gcc 15 and tries the build, so every push re-asks whether gcc can compile this yet. The answer lands in the run summary. |
 | `sanitizers` | the same tests under ASan + UBSan (clang) |
 | `fuzz` | two minutes of libFuzzer over the parser, uploading any crashing input as an artifact |
+| `coverage` | llvm-cov over both test binaries; table in the run summary, HTML report as an artifact. Reports, never gates. |
 | `qml` | parses every `.qml` with `qmlformat` |
 | `plugin` | every setting `Settings.qml` saves has a default in `manifest.json`, every manifest entry point exists, and no QML still reaches for the retired scripts |
 
@@ -398,7 +431,7 @@ The transcript is built to hold a steady frame at 120 Hz.
 | `BarWidget.qml` | bar entry and unread badge |
 | `Settings.qml` | side, width, intervals, notification toggles |
 | `native/html.cppm` | HTML metadata parser behind the link previews |
-| `native/tests/` | unit tests, the fuzz target and its corpus |
+| `native/tests/` | unit tests for the parser and the agent's pure logic, the fuzz target and its corpus |
 | `Makefile` | builds all of the above; see **Building** |
 | `Components/` | `ConversationList`, `MessageList`, `MessageItem`, `SmoothList`, `LinkCard`, `Composer`, `Mrkdwn.js` |
 

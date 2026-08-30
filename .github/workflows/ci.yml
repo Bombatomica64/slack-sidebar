@@ -49,25 +49,29 @@ jobs:
           ./build/slack-agent unfurl http://127.0.0.1:1/x | grep -q '"unfurls":{}'
 
   gcc-modules-probe:
-    name: gcc 15 (probe, non-blocking)
+    name: newest gcc (probe, non-blocking)
     runs-on: ubuntu-latest
     # Never gates a merge, and never goes red. gcc cannot build this today -
-    # gcc 13 segfaults and gcc 14 hits an internal compiler error on modules
-    # against Qt - and the Makefile refuses it for that reason. This job answers
-    # one question on every push: has gcc 15 fixed it? A "no" is a result, not a
-    # failure, so the verdict goes in the run summary and the job exits 0.
+    # 13 segfaults, 14 and 16 hit internal compiler errors on modules against Qt
+    # - and the Makefile refuses it for that reason. This job answers one
+    # question on every push: has the newest gcc fixed it? A "no" is a result,
+    # not a failure, so the verdict goes in the run summary and the job exits 0.
+    #
+    # gcc:latest rather than a pinned major, because a pinned one goes stale
+    # silently - this job was written against 15 and was already a release
+    # behind. The version it actually got is reported with the verdict.
     continue-on-error: true
     # The official gcc image, rather than apt on the runner. Ubuntu 24.04 has no
-    # gcc 15, and `apt-get install g++-15` does not fail on a missing package:
-    # apt falls back to treating the name as a regex, which matches clang-15 and
-    # flang-15 and reports success, so the probe cheerfully installs the wrong
-    # compiler and then finds no g++-15.
+    # gcc newer than 14, and `apt-get install g++-15` does not fail on a missing
+    # package: apt falls back to treating the name as a regex, which matches
+    # clang-15 and flang-15 and reports success, so an apt-based probe installs
+    # the wrong compiler and then finds no g++.
     container:
-      image: gcc:15
+      image: gcc:latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build with gcc 15 and record the verdict
+      - name: Build with the newest gcc and record the verdict
         run: |
           verdict=setup-failed
           detail=
@@ -105,7 +109,7 @@ jobs:
                 echo '```'
                 ;;
               *)
-                echo "### gcc 15 probe: not run"
+                echo "### newest-gcc probe: not run"
                 echo
                 echo "The toolchain or the Qt/libsecret/OpenSSL headers could not"
                 echo "be installed in the gcc:15 container, so the question is"
@@ -171,6 +175,44 @@ jobs:
         with:
           name: fuzz-crash
           path: crash-*
+          if-no-files-found: ignore
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain and libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev
+
+      # Not a gate. Nothing here fails for a low number: the point is to make
+      # visible which parts of the agent the tests do not reach, so that gap is
+      # a decision rather than a surprise.
+      - name: Measure coverage
+        run: |
+          make CXX=clang++ coverage | tee coverage.txt
+
+      - name: Put the table in the run summary
+        if: always()
+        run: |
+          {
+            echo "### Coverage"
+            echo
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the line-by-line report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: build/cov/html
           if-no-files-found: ignore
 
   qml:

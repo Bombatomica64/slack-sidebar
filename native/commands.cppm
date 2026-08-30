@@ -42,6 +42,12 @@ namespace u = slack::util;
 namespace net = slack::net;
 namespace html = slack::html;
 
+export namespace slack::commands {
+// Declared here because the file-local helpers below call it, and defined with
+// the rest of the exported surface further down.
+bool crawlable(const QString& url);
+}  // namespace slack::commands
+
 namespace {
 
 // Subtypes worth showing. Everything else (joins, leaves, topic changes) is
@@ -191,53 +197,6 @@ QStringList splitIds(const QString& csv) {
 
 // ------------------------------------------------------------ link previews
 
-// Only public http(s) may be crawled. A colleague pasting
-// http://127.0.0.1:8080/shutdown must not make this machine visit it, and the
-// same goes for cloud metadata endpoints and anything on the LAN. This checks
-// the address as written; it is not a defence against a public hostname that
-// resolves to a private one.
-bool crawlable(const QString& url) {
-    const QUrl parsed(url);
-    const QString scheme = parsed.scheme();
-    if (scheme != u::qs("http") && scheme != u::qs("https"))
-        return false;
-    const QString host = parsed.host().toLower();
-    if (host.isEmpty())
-        return false;
-
-    static const QStringList badSuffixes{u::qs(".localhost"), u::qs(".local"), u::qs(".internal"),
-                                         u::qs(".home.arpa"), u::qs(".onion")};
-    if (host == u::qs("localhost"))
-        return false;
-    for (const QString& suffix : badSuffixes) {
-        if (host.endsWith(suffix))
-            return false;
-    }
-
-    const QHostAddress address(host);
-    if (!address.isNull()) {
-        // A literal address: judge it directly rather than by prefix matching.
-        if (address.isLoopback() || address.isLinkLocal() || address.isSiteLocal() ||
-            address.isMulticast() || address.isBroadcast() || address.isNull())
-            return false;
-        const quint32 v4 = address.toIPv4Address();
-        if (address.protocol() == QAbstractSocket::IPv4Protocol) {
-            const quint32 top = v4 >> 24;
-            if (top == 0 || top == 10 || top == 127)
-                return false;
-            if ((v4 >> 20) == ((172u << 12) | 1))  // 172.16/12
-                return false;
-            if ((v4 >> 16) == ((192u << 8) | 168))
-                return false;
-            if ((v4 >> 22) == ((100u << 14) | (64u << 8) >> 2))  // 100.64/10
-                return false;
-        }
-        return true;
-    }
-    // A name with no dot is a LAN hostname, not something on the public internet.
-    return host.contains('.');
-}
-
 QString assetExtension(const QString& contentType) {
     const QString type = contentType.toLower();
     if (type.contains(u::qs("png")))
@@ -261,7 +220,7 @@ QString assetExtension(const QString& contentType) {
 // but a local file cannot pop in late while the transcript scrolls, and it
 // costs nothing on the second read of the same conversation.
 QString mirrorAsset(net::Client& http, const QString& url, const QString& directory, qint64 maxBytes) {
-    if (url.isEmpty() || !crawlable(url))
+    if (url.isEmpty() || !slack::commands::crawlable(url))
         return {};
     QDir().mkpath(directory);
     const QString key = u::hashOf(url);
@@ -292,6 +251,72 @@ QString mirrorAsset(net::Client& http, const QString& url, const QString& direct
 }  // namespace
 
 export namespace slack::commands {
+// Only public http(s) may be crawled. A colleague pasting
+// http://127.0.0.1:8080/shutdown must not make this machine visit it, and the
+// same goes for cloud metadata endpoints and anything on the LAN. This checks
+// the address as written; it is not a defence against a public hostname that
+// resolves to a private one.
+// Exported so the tests can reach it. Everything else in this module needs a
+// Slack token or the network; this is pure, and it is the piece most worth
+// pinning down.
+bool crawlable(const QString& url) {
+    const QUrl parsed(url);
+    const QString scheme = parsed.scheme();
+    if (scheme != u::qs("http") && scheme != u::qs("https"))
+        return false;
+    const QString host = parsed.host().toLower();
+    if (host.isEmpty())
+        return false;
+
+    static const QStringList badSuffixes{u::qs(".localhost"), u::qs(".local"), u::qs(".internal"),
+                                         u::qs(".home.arpa"), u::qs(".onion")};
+    if (host == u::qs("localhost"))
+        return false;
+    for (const QString& suffix : badSuffixes) {
+        if (host.endsWith(suffix))
+            return false;
+    }
+
+    const QHostAddress address(host);
+    if (!address.isNull()) {
+        // A literal address: judge it directly rather than by prefix matching.
+        if (address.isLoopback() || address.isLinkLocal() || address.isSiteLocal() ||
+            address.isMulticast() || address.isBroadcast() || address.isNull())
+            return false;
+        if (address.protocol() == QAbstractSocket::IPv4Protocol) {
+            const quint32 v4 = address.toIPv4Address();
+            // Written as base address and prefix length rather than by hand:
+            // the hand-rolled version of this had 172.16/12 and 100.64/10 wrong
+            // and let both through, which the tests caught.
+            struct Range {
+                quint32 base;
+                int prefix;
+            };
+            static constexpr Range kPrivate[]{
+                {0x00000000u, 8},   // 0.0.0.0/8, "this network"
+                {0x0A000000u, 8},   // 10/8
+                {0x64400000u, 10},  // 100.64/10, carrier-grade NAT
+                {0x7F000000u, 8},   // 127/8, loopback
+                {0xA9FE0000u, 16},  // 169.254/16, link-local
+                {0xAC100000u, 12},  // 172.16/12
+                {0xC0A80000u, 16},  // 192.168/16
+                {0xE0000000u, 4},   // 224/4, multicast
+                {0xF0000000u, 4},   // 240/4, reserved
+            };
+            for (const Range& range : kPrivate) {
+                const quint32 mask = range.prefix == 0
+                                         ? 0u
+                                         : ~((quint32{1} << (32 - range.prefix)) - 1);
+                if ((v4 & mask) == range.base)
+                    return false;
+            }
+        }
+        return true;
+    }
+    // A name with no dot is a LAN hostname, not something on the public internet.
+    return host.contains('.');
+}
+
 
 QString unfurlDir() { return u::cacheDir() + u::qs("/unfurl"); }
 QString unfurlAssetsDir() { return u::cacheDir() + u::qs("/unfurl-img"); }

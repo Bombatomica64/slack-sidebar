@@ -164,6 +164,23 @@ DEP_CFLAGS := $(patsubst -I%,-isystem %,$(shell pkg-config --cflags $(DEP_PACKAG
 	-DQT_NO_KEYWORDS -DQT_DISABLE_DEPRECATED_UP_TO=0x060400
 DEP_LIBS   := $(shell pkg-config --libs $(DEP_PACKAGES) 2>/dev/null)
 
+# Coverage, through clang's source-based instrumentation. Same clang-only story
+# as the sanitizers, for the same reason: gcc cannot build this at all.
+COV := -fprofile-instr-generate -fcoverage-mapping
+
+ifeq ($(COVERAGE),1)
+  BUILD_CXXFLAGS += $(COV)
+  BUILD_LDFLAGS  += $(COV)
+endif
+
+# The tools ship beside the compiler and are usually versioned to match it.
+LLVM_PROFDATA := $(shell command -v llvm-profdata 2>/dev/null || command -v llvm-profdata-$(CXX_MAJOR) 2>/dev/null)
+LLVM_COV      := $(shell command -v llvm-cov 2>/dev/null || command -v llvm-cov-$(CXX_MAJOR) 2>/dev/null)
+COVDIR        := $(BUILDDIR)/cov
+# Not a gate - nothing fails for being under it. It is the line between "has
+# some tests" and "has tests in name only", so the report can say which is which.
+COVERAGE_FLOOR ?= 25
+
 # QML has no compiler to run in CI, but qmlformat parses it, and a parse gate is
 # most of what a QML syntax error costs you. qmllint would be better still and
 # is deliberately not used: it cannot resolve Noctalia's qs.Commons/qs.Widgets
@@ -216,14 +233,16 @@ MODULE_BMIS := $(MODULE_NAMES:%=$(BUILDDIR)/slack.%.$(BMI_EXT))
 
 AGENT_SRC := native/agent_main.cpp
 TEST_SRC  := native/tests/html_meta_test.cpp
+AGENT_TEST_SRC := native/tests/agent_test.cpp
 FUZZ_SRC  := native/tests/html_meta_fuzz.cpp
 CORPUS    := native/tests/corpus
 
 AGENT := $(BUILDDIR)/slack-agent
 TEST  := $(BUILDDIR)/html_meta_test
+AGENT_TEST := $(BUILDDIR)/agent_test
 FUZZ  := $(BUILDDIR)/html_meta_fuzz
 
-.PHONY: all test check qml fuzz install uninstall clean help print-config
+.PHONY: all test check qml fuzz coverage install uninstall clean help print-config
 
 all: $(AGENT)
 
@@ -272,16 +291,25 @@ $(BUILDDIR)/html_meta_test.o: $(TEST_SRC) $(BUILDDIR)/slack.html.$(BMI_EXT) | $(
 $(AGENT): $(MODULE_OBJS) $(BUILDDIR)/agent_main.o
 	$(CXX) $(BUILD_CXXFLAGS) -o $@ $^ $(DEP_LIBS) $(BUILD_LDFLAGS)
 
-# The tests cover the pure parser, which imports nothing else and needs none of
-# the libraries the agent links.
+# The parser tests link only the parser: it imports nothing else and needs none
+# of the libraries the agent does.
 $(TEST): $(BUILDDIR)/html.o $(BUILDDIR)/html_meta_test.o
 	$(CXX) $(BUILD_CXXFLAGS) -o $@ $^ $(BUILD_LDFLAGS)
+
+# The agent tests cover the pure logic - the address guard above all - so they
+# link every module and the libraries with it.
+$(BUILDDIR)/agent_test.o: $(AGENT_TEST_SRC) $(MODULE_BMIS) | $(BUILDDIR)
+	$(CXX) $(BUILD_CXXFLAGS) $(DEP_CFLAGS) $(MODULE_IMPORT) -c -o $@ $<
+
+$(AGENT_TEST): $(MODULE_OBJS) $(BUILDDIR)/agent_test.o
+	$(CXX) $(BUILD_CXXFLAGS) -o $@ $^ $(DEP_LIBS) $(BUILD_LDFLAGS)
 
 $(BUILDDIR):
 	@mkdir -p $(BUILDDIR)
 
-test: $(TEST)
+test: $(TEST) $(AGENT_TEST)
 	@$(TEST)
+	@$(AGENT_TEST)
 
 # What CI runs: the strict build, the tests, and the tests again under the
 # sanitizers. The sanitized pass is a separate sub-make because it needs
@@ -324,6 +352,39 @@ fuzz: $(FUZZ)
 	@mkdir -p $(BUILDDIR)/corpus
 	$(FUZZ) -max_total_time=$(FUZZ_TIME) -max_len=65536 -print_final_stats=1 \
 	  $(BUILDDIR)/corpus $(CORPUS)
+
+# What is tested, and - more usefully - what is not. Prints llvm-cov's table for
+# the code the tests reach, then names every module they do not reach at all,
+# because a module with no test binary linking it never appears in a coverage
+# report and its absence is easy to miss.
+coverage:
+	@if [ "$(CXX_IS_CLANG)" != "1" ]; then \
+	  echo "coverage needs clang; try make coverage CXX=clang++" >&2; exit 1; fi
+	@if [ -z "$(LLVM_PROFDATA)" ] || [ -z "$(LLVM_COV)" ]; then \
+	  echo "llvm-profdata/llvm-cov not found (install llvm-$(CXX_MAJOR))" >&2; exit 1; fi
+	@$(MAKE) --no-print-directory COVERAGE=1 BUILDDIR=$(COVDIR) $(COVDIR)/html_meta_test $(COVDIR)/agent_test
+	@LLVM_PROFILE_FILE=$(COVDIR)/parser.profraw $(COVDIR)/html_meta_test >/dev/null
+	@LLVM_PROFILE_FILE=$(COVDIR)/agent.profraw $(COVDIR)/agent_test >/dev/null
+	@$(LLVM_PROFDATA) merge -sparse -o $(COVDIR)/test.profdata $(COVDIR)/parser.profraw $(COVDIR)/agent.profraw
+	@echo
+	@$(LLVM_COV) report $(COVDIR)/html_meta_test -object $(COVDIR)/agent_test \
+	  -instr-profile=$(COVDIR)/test.profdata -ignore-filename-regex='(tests/|/usr/)'
+	@$(LLVM_COV) show $(COVDIR)/html_meta_test -object $(COVDIR)/agent_test \
+	  -instr-profile=$(COVDIR)/test.profdata -ignore-filename-regex='(tests/|/usr/)' \
+	  -format=html -output-dir=$(COVDIR)/html >/dev/null 2>&1 || true
+	@echo
+	@$(LLVM_COV) report $(COVDIR)/html_meta_test -object $(COVDIR)/agent_test \
+	    -instr-profile=$(COVDIR)/test.profdata -ignore-filename-regex='(tests/|/usr/)' \
+	  | awk '/\.cppm/ { pct = $$10 + 0; if (pct < $(COVERAGE_FLOOR)) print "  " $$1 "  " $$10 }' \
+	  > $(COVDIR)/thin.txt; \
+	  if [ -s $(COVDIR)/thin.txt ]; then \
+	    echo "Effectively untested (line coverage under $(COVERAGE_FLOOR)%):"; \
+	    cat $(COVDIR)/thin.txt; \
+	  else \
+	    echo "Every module is above $(COVERAGE_FLOOR)% line coverage."; \
+	  fi
+	@echo
+	@echo "line-by-line html: $(COVDIR)/html/index.html"
 
 install: $(AGENT)
 	@mkdir -p $(BINDIR)

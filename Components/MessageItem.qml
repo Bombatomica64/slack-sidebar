@@ -155,7 +155,7 @@ Item {
             }
         }
 
-        // Link previews: Slack's own unfurls and the ones slack.sh crawled.
+        // Link previews: Slack's own unfurls and the ones the agent crawled.
         Repeater {
             model: root.cards
 

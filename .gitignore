@@ -9,9 +9,17 @@ settings.json
 *.bak-*
 *~
 
-# Compiled link-preview helper, when built in-tree rather than into the cache dir
-native/slack-unfurl
+# Native build output. The helper normally builds into the cache dir, but
+# `make` on its own puts it here.
+build/
 *.o
 
 # Byte-compiled Python from py_compile runs
 __pycache__/
+
+# libFuzzer writes these next to the binary when it finds something
+crash-*
+leak-*
+timeout-*
+# gcc drops binary module interfaces here if no mapper file is given
+gcm.cache/

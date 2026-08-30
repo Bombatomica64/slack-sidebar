@@ -1,0 +1,269 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: native (clang)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # clang only, and not by preference: gcc 13 segfaults compiling a module
+      # that uses std::string, and gcc 14 ICEs on this code with or without
+      # debug info. The Makefile refuses gcc by version with that explanation.
+      - name: Install the toolchain and libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev
+
+      - name: Show the toolchain the build settled on
+        run: make CXX=clang++ print-config
+
+      # STRICT=1 is -Werror. It lives here rather than in the default build so
+      # that a compiler newer than this commit inventing a new warning breaks CI
+      # rather than someone's first plugin start.
+      - name: Build and test with warnings as errors
+        run: make CXX=clang++ STRICT=1 all test
+
+      - name: The agent answers without a keyring or a token
+        run: |
+          set -x
+          ./build/slack-agent | grep -q '"ok":false'
+          ./build/slack-agent credentials | grep -q '"ok":true'
+          printf '<html><head><meta property="og:title" content="ci"></head></html>' \
+            | ./build/slack-agent parse-html https://example.com/ | grep -q '"title":"ci"'
+          # A pasted loopback URL must never be fetched.
+          ./build/slack-agent unfurl http://127.0.0.1:1/x | grep -q '"unfurls":{}'
+
+  gcc-modules-probe:
+    name: newest gcc (probe, non-blocking)
+    runs-on: ubuntu-latest
+    # Never gates a merge, and never goes red. gcc cannot build this today -
+    # 13 segfaults, 14 and 16 hit internal compiler errors on modules against Qt
+    # - and the Makefile refuses it for that reason. This job answers one
+    # question on every push: has the newest gcc fixed it? A "no" is a result,
+    # not a failure, so the verdict goes in the run summary and the job exits 0.
+    #
+    # gcc:latest rather than a pinned major, because a pinned one goes stale
+    # silently - this job was written against 15 and was already a release
+    # behind. The version it actually got is reported with the verdict.
+    continue-on-error: true
+    # The official gcc image, rather than apt on the runner. Ubuntu 24.04 has no
+    # gcc newer than 14, and `apt-get install g++-15` does not fail on a missing
+    # package: apt falls back to treating the name as a regex, which matches
+    # clang-15 and flang-15 and reports success, so an apt-based probe installs
+    # the wrong compiler and then finds no g++.
+    container:
+      image: gcc:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with the newest gcc and record the verdict
+        run: |
+          verdict=setup-failed
+          detail=
+          version=unknown
+          if apt-get update -qq \
+             && apt-get install -y --no-install-recommends \
+                  make pkg-config qt6-base-dev libsecret-1-dev libssl-dev; then
+            version="$(g++ -dumpfullversion 2>/dev/null || echo unknown)"
+            # ALLOW_GCC=1 lifts the Makefile's own gate, so a failure here is
+            # gcc's and not ours. STRICT stays off: a compiler this much newer
+            # inventing a new warning is not what is being measured.
+            if make CXX=g++ ALLOW_GCC=1 all test >gcc15.log 2>&1; then
+              verdict=builds
+            else
+              verdict=fails
+              detail="$(grep -m3 -E 'internal compiler error|error:' gcc15.log || tail -20 gcc15.log)"
+            fi
+          fi
+
+          {
+            case "$verdict" in
+              builds)
+                echo "### gcc $version builds this :tada:"
+                echo
+                echo "The clang-only gate in the Makefile can go: set gcc's"
+                echo '`CXX_MIN` to 15 and restore a gcc entry in the `native` job.'
+                ;;
+              fails)
+                echo "### gcc $version still cannot build this"
+                echo
+                echo "The build stays clang-only. First failure:"
+                echo
+                echo '```'
+                echo "$detail"
+                echo '```'
+                ;;
+              *)
+                echo "### newest-gcc probe: not run"
+                echo
+                echo "The toolchain or the Qt/libsecret/OpenSSL headers could not"
+                echo "be installed in the gcc:15 container, so the question is"
+                echo "still open. The build stays clang-only."
+                ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "verdict: $verdict (gcc $version)"
+          # Also to the job log, not just the summary: reading it should not
+          # require downloading an artifact or opening another tab.
+          [ -n "$detail" ] && printf '%s\n' "$detail"
+          # A "no" is the answer, not a failure.
+          exit 0
+
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcc-probe-build-log
+          path: gcc15.log
+          if-no-files-found: ignore
+
+  sanitizers:
+    name: sanitizers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # clang, not gcc: gcc 14 ICEs compiling a module unit with -fsanitize
+      # (cp/module.cc:9455). The Makefile refuses that combination outright.
+      - name: Install the toolchain and libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev
+
+      - name: Tests under AddressSanitizer and UndefinedBehaviorSanitizer
+        run: make CXX=clang++ STRICT=1 SANITIZE=1 test
+
+  fuzz:
+    name: fuzz the parser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # libFuzzer ships with clang. This is the pass that actually earns its
+      # runtime: the parser's entire input is bytes chosen by whoever owns the
+      # page behind a pasted link, and every bug found in it so far was found
+      # here rather than by anyone writing a test case.
+      - name: Install the toolchain and libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev
+
+      - name: Fuzz for two minutes over the checked-in corpus
+        run: make CXX=clang++ fuzz FUZZ_TIME=120
+
+      - name: Keep any crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: crash-*
+          if-no-files-found: ignore
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain and libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev
+
+      # Not a gate. Nothing here fails for a low number: the point is to make
+      # visible which parts of the agent the tests do not reach, so that gap is
+      # a decision rather than a surprise.
+      - name: Measure coverage
+        run: |
+          make CXX=clang++ coverage | tee coverage.txt
+
+      - name: Put the table in the run summary
+        if: always()
+        run: |
+          {
+            echo "### Coverage"
+            echo
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the line-by-line report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: build/cov/html
+          if-no-files-found: ignore
+
+  qml:
+    name: qml syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt QML tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qt6-declarative-dev-tools
+
+      # A parse gate, not a lint: qmllint cannot resolve Noctalia's qs.Commons
+      # and qs.Widgets modules, so it would report nothing but unresolved
+      # imports. This catches the errors that would otherwise only show up as a
+      # blank sidebar at runtime.
+      - name: Parse every QML file
+        run: make QMLFORMAT=/usr/lib/qt6/bin/qmlformat qml
+
+  plugin:
+    name: manifest and entry points
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every setting the pane saves has a manifest default
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys
+
+          manifest = json.load(open("manifest.json"))
+          defaults = manifest["metadata"]["defaultSettings"]
+
+          # A setting Settings.qml writes with no default in the manifest reads
+          # back as undefined on a fresh install.
+          saved = set(re.findall(r"pluginApi\.pluginSettings\.(\w+)\s*=", open("Settings.qml").read()))
+          missing = sorted(saved - set(defaults))
+          if missing:
+              sys.exit("Settings.qml saves keys with no manifest default: " + ", ".join(missing))
+
+          for role, path in manifest["entryPoints"].items():
+              if not os.path.exists(path):
+                  sys.exit(f"entryPoints.{role} points at a missing file: {path}")
+
+          # The scripts are gone; nothing may reach for them again.
+          for qml in ["Main.qml", "Settings.qml", "Panel.qml", "BarWidget.qml"]:
+              body = open(qml).read()
+              for dead in ["slack.sh", "oauth-login.py"]:
+                  if dead in body:
+                      sys.exit(f"{qml} still refers to {dead}, which no longer exists")
+
+          print(f"{len(defaults)} defaults, {len(manifest['entryPoints'])} entry points, all present")
+          PY

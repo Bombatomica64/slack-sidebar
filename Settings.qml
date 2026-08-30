@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Widgets
@@ -13,6 +14,12 @@ ColumnLayout {
 
     function initial(key, fallback) {
         return pluginApi?.pluginSettings?.[key] ?? defaults[key] ?? fallback;
+    }
+
+    // Same location Main.qml builds it into.
+    function agentPath() {
+        const override = Quickshell.env("XDG_CACHE_HOME");
+        return (override && override !== "" ? override : Quickshell.env("HOME") + "/.cache") + "/noctalia-slack/bin/slack-agent";
     }
 
     property string editTokenPreference: initial("tokenPreference", "auto")
@@ -221,7 +228,7 @@ ColumnLayout {
     Process {
         id: credentialsProbe
         running: true
-        command: ["bash", (root.pluginApi?.pluginDir ?? "") + "/slack.sh", "credentials"]
+        command: [root.agentPath(), "credentials"]
         stdout: StdioCollector {
             onStreamFinished: {
                 try {
@@ -255,7 +262,7 @@ ColumnLayout {
         const id = clientIdField.text.trim();
         const secret = clientSecretField.text.trim();
         if (id !== "" && secret !== "" && !storeCredentials.running) {
-            storeCredentials.command = ["bash", pluginApi.pluginDir + "/slack.sh", "set-credentials", id, secret];
+            storeCredentials.command = [root.agentPath(), "set-credentials", id, secret];
             storeCredentials.running = true;
         }
 

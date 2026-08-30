@@ -10,10 +10,10 @@ import qs.Widgets
  * left, then service name, title, description and picture.
  *
  * Fed either by Slack (message.attachments, when Slack unfurled the link for
- * us) or by `slack.sh unfurl`, which crawls the page itself. Both arrive in the
+ * us) or by `slack-agent unfurl`, which crawls the page itself. Both arrive in the
  * same shape, so this component does not know or care which produced it.
  *
- * Every image path is a local file mirrored by slack.sh: a remote source would
+ * Every image path is a local file mirrored by the agent: a remote source would
  * decode on the render thread mid-scroll and pop in a frame or two later, which
  * is exactly the kind of hitch the transcript is trying to avoid.
  */
@@ -49,7 +49,7 @@ Item {
 
     readonly property bool hasImage: imagePath !== "" && preview.status === Image.Ready
 
-    // slack.sh mirrors crawled images to disk, but Slack's own unfurls arrive as
+    // The agent mirrors crawled images to disk, but Slack's own unfurls arrive as
     // CDN URLs it has already made public, so both shapes have to work.
     function sourceFor(path) {
         if (!path)

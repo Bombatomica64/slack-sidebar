@@ -11,7 +11,7 @@ import "Components/Mrkdwn.js" as Mrkdwn
 /**
  * Slack plugin state holder.
  *
- * All Slack access goes through slack.sh, which returns one JSON object per
+ * All Slack access goes through the slack-agent binary, which returns one JSON object per
  * call. This file owns the polling cadence, the active conversation, and the
  * unread bookkeeping; the panel is a pure view over these properties.
  */
@@ -184,7 +184,7 @@ Item {
 
     // ------------------------------------------------------- link previews
 
-    // url -> {url, site, title, description, image, icon}. slack.sh keeps the
+    // url -> {url, site, title, description, image, icon}. The agent keeps the
     // real cache on disk; this is only what the visible messages need.
     property var unfurls: ({})
     // Links already asked about, whether or not they produced a card. Without
@@ -355,9 +355,22 @@ Item {
         return pluginApi?.pluginDir || (Quickshell.env("HOME") + "/.config/noctalia/plugins/slack");
     }
 
-    function helper() {
-        return pluginDir() + "/slack.sh";
+    // The agent is a compiled binary, built into the cache directory rather than
+    // into the clone: a plugin directory is somebody's checkout, not a build
+    // tree. Everything Slack-related goes through it.
+    function cacheDir() {
+        const override = Quickshell.env("XDG_CACHE_HOME");
+        return (override && override !== "" ? override : Quickshell.env("HOME") + "/.cache") + "/noctalia-slack";
     }
+
+    function agent() {
+        return cacheDir() + "/bin/slack-agent";
+    }
+
+    // Set once the agent has answered a call. Nothing else runs until it has:
+    // a missing binary would otherwise look like a hundred separate failures.
+    property bool agentReady: false
+    property bool agentBuilding: false
 
     // Slack has rejected the credentials and renewing them is not possible, so
     // reopen the sign-in instead of leaving a dead sidebar with a red line.
@@ -380,7 +393,7 @@ Item {
     function _parse(text, context) {
         const raw = String(text || "").trim();
         if (raw === "") {
-            root.lastError = context + ": no output from slack.sh";
+            root.lastError = context + ": no output from the Slack helper";
             Logger.e("Slack", root.lastError);
             return null;
         }
@@ -402,9 +415,9 @@ Item {
     }
 
     function _run(proc, args) {
-        if (proc.running)
+        if (proc.running || !root.agentReady)
             return false;
-        const base = ["bash", root.helper()];
+        const base = [root.agent()];
         if (root.tokenPreference !== "auto")
             base.push("--token", root.tokenPreference);
         // A user token already reports the right identity; the override exists
@@ -441,14 +454,14 @@ Item {
         _run(storeCredsProc, ["set-credentials", clientId, clientSecret]);
     }
 
-    // Full OAuth flow: oauth-login.py serves the registered loopback redirect,
+    // Full OAuth flow: the agent serves the registered loopback redirect,
     // so the browser hands the code straight back with nothing to copy.
     function signIn() {
         if (root.signingIn)
             return;
         root.signingIn = true;
         root.lastError = "";
-        oauthProc.command = ["python3", root.pluginDir() + "/oauth-login.py", root.redirectUri];
+        oauthProc.command = [root.agent(), "signin", root.redirectUri];
         oauthProc.running = true;
     }
 
@@ -715,13 +728,67 @@ Item {
 
     // ----------------------------------------------------------- startup
 
-    Component.onCompleted: {
+    // ------------------------------------------------------------- bootstrap
+
+    // The agent builds itself on first use. `make` is a no-op once the binary
+    // is current, so probing and building is cheap enough to do at every start
+    // and self-healing when the plugin is updated.
+    function _startup() {
+        root.agentReady = true;
         refreshIdentity();
         refreshList(false);
         refreshEmoji();
         refreshAvatars();
         refreshCredentials();
     }
+
+    function buildAgent() {
+        if (root.agentBuilding)
+            return;
+        root.agentBuilding = true;
+        root.lastError = "Building the Slack helper…";
+        buildProc.command = ["make", "-C", root.pluginDir(), "--no-print-directory", "PREFIX=" + root.cacheDir(), "BUILDDIR=" + root.cacheDir() + "/build", "install"];
+        buildProc.running = true;
+    }
+
+    Component.onCompleted: probeProc.running = true
+
+    // Any subcommand that needs neither a token nor the network will do; this
+    // one only reads the keyring.
+    Process {
+        id: probeProc
+        command: [root.agent(), "credentials"]
+        stdout: StdioCollector {}
+        stderr: StdioCollector {}
+        onExited: (code, status) => {
+            if (code === 0)
+                root._startup();
+            else
+                root.buildAgent();
+        }
+    }
+
+    Process {
+        id: buildProc
+        stdout: StdioCollector {}
+        stderr: StdioCollector {
+            onStreamFinished: root._buildLog = String(this.text || "")
+        }
+        onExited: (code, status) => {
+            root.agentBuilding = false;
+            if (code === 0) {
+                root.lastError = "";
+                root._startup();
+                return;
+            }
+            // Naming the two things that actually go wrong beats a build log in
+            // a sidebar subtitle.
+            root.lastError = "Could not build the Slack helper. It needs make, Qt 6 development headers, libsecret and OpenSSL, and a compiler new enough for C++20 modules (clang 17+ or gcc 14+). Run `make` in " + root.pluginDir() + " to see why.";
+            Logger.e("Slack", "helper build failed: " + root._buildLog.slice(-2000));
+        }
+    }
+
+    property string _buildLog: ""
 
     onWatchedIdsChanged: pollDebounce.restart()
     onUserMapChanged: avatarDebounce.restart()

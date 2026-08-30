@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to attach a build to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: publish helper binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Check the tag matches the manifest version
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          want="v$(python3 -c 'import json;print(json.load(open("manifest.json"))["version"])')"
+          if [ "$tag" != "$want" ]; then
+            echo "tag $tag does not match manifest.json version ($want)" >&2
+            exit 1
+          fi
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang qt6-base-dev libsecret-1-dev libssl-dev
+
+      - name: Build
+        run: make CXX=clang++ STRICT=1 PORTABLE=1 all
+
+      - name: Verify the binary runs and is self-contained
+        run: |
+          # Qt, libsecret and OpenSSL are expected in the needed list - they are
+          # runtime dependencies the user's distro provides. libstdc++ is not:
+          # it is statically linked so the binary loads on older distros too.
+          ldd build/slack-agent || true
+          if ldd build/slack-agent | grep -qE 'libstdc\+\+|libgcc_s'; then
+            echo "binary still links libstdc++/libgcc dynamically" >&2
+            exit 1
+          fi
+          printf '<html><head><meta property="og:title" content="smoke"></head></html>' \
+            | ./build/slack-agent parse-html https://example.com/ | tee /dev/stderr | grep -q '"title":"smoke"'
+
+      - name: Name the artifact after the platform it was built for
+        id: artifact
+        run: |
+          name="slack-agent-$(uname -m)-linux-gnu"
+          cp build/slack-agent "$name"
+          sha256sum "$name" > "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # The plugin builds this itself on first run; the artifact is the escape
+      # hatch for a machine whose compiler is too old for C++20 modules.
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "$tag" --generate-notes
+          gh release upload "$tag" \
+            "${{ steps.artifact.outputs.name }}" \
+            "${{ steps.artifact.outputs.name }}.sha256" \
+            --clobber

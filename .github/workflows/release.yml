@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to attach a build to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: publish helper binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Check the tag matches the manifest version
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          want="v$(python3 -c 'import json;print(json.load(open("manifest.json"))["version"])')"
+          if [ "$tag" != "$want" ]; then
+            echo "tag $tag does not match manifest.json version ($want)" >&2
+            exit 1
+          fi
+
+      # gcc rather than clang for the release build: the runner's gcc is the
+      # oldest toolchain we support, so a binary it produces is the one most
+      # likely to load on someone else's distro.
+      - name: Build
+        run: make CXX=g++ STRICT=1 PORTABLE=1 all
+
+      - name: Verify the binary runs and is self-contained
+        run: |
+          # libstdc++ and libgcc are linked statically; anything else left in
+          # the needed list would be a dependency we cannot promise the user has.
+          ldd build/slack-unfurl || true
+          if ldd build/slack-unfurl | grep -qE 'libstdc\+\+|libgcc_s'; then
+            echo "binary still links libstdc++/libgcc dynamically" >&2
+            exit 1
+          fi
+          printf '<html><head><meta property="og:title" content="smoke"></head></html>' \
+            | ./build/slack-unfurl https://example.com/ | tee /dev/stderr | grep -q '"title":"smoke"'
+
+      - name: Name the artifact after the platform it was built for
+        id: artifact
+        run: |
+          name="slack-unfurl-$(uname -m)-linux-gnu"
+          cp build/slack-unfurl "$name"
+          sha256sum "$name" > "$name.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # The plugin builds this helper itself on first use, so the release
+      # artifact is a convenience for machines with no compiler, not the
+      # supported install path.
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "$tag" --generate-notes
+          gh release upload "$tag" \
+            "${{ steps.artifact.outputs.name }}" \
+            "${{ steps.artifact.outputs.name }}.sha256" \
+            --clobber

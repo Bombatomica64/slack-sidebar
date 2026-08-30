@@ -740,22 +740,49 @@ cmd_avatars() {
 # should not. Everything below is built around those two rules.
 
 UNFURL_BIN="$CACHE_DIR/bin/slack-unfurl"
-UNFURL_SRC="$SCRIPT_DIR/native/unfurl.cpp"
+UNFURL_SRC_DIR="$SCRIPT_DIR/native"
 UNFURL_BUILD_LOG="$CACHE_DIR/bin/build.log"
+
+# The newest of the native sources, so "is the binary stale?" stays right when
+# only the header changed.
+newest_unfurl_source() {
+  local src newest=""
+  for src in "$UNFURL_SRC_DIR"/*.cpp "$UNFURL_SRC_DIR"/*.hpp; do
+    [[ -f "$src" ]] || continue
+    [[ -z "$newest" || "$src" -nt "$newest" ]] && newest="$src"
+  done
+  [[ -n "$newest" ]] || return 1
+  printf '%s' "$newest"
+}
 
 # Built on demand rather than at install time: the plugin is cloned, not
 # packaged, and a compiler is not a dependency — when there is none, or the
 # build fails, the shell fallback below still produces a card.
 build_unfurl_helper() {
-  [[ -f "$UNFURL_SRC" ]] || return 1
+  [[ -f "$UNFURL_SRC_DIR/html_meta.cpp" ]] || return 1
   mkdir -p "$CACHE_DIR/bin" 2>/dev/null || return 1
+
+  # The Makefile owns the flag set and picks the newest standard the compiler
+  # admits to, so prefer it. Build outside the clone: the plugin directory is
+  # somebody's checkout, not a scratch space.
+  if command -v make >/dev/null 2>&1; then
+    if make -C "$SCRIPT_DIR" --no-print-directory \
+         PREFIX="$CACHE_DIR" BUILDDIR="$CACHE_DIR/build" install \
+         >>"$UNFURL_BUILD_LOG" 2>&1 && [[ -x "$UNFURL_BIN" ]]; then
+      return 0
+    fi
+  fi
+
+  # No make: reproduce just enough of it by hand. C++26 is what the source
+  # targets; the older standards are here so a 2023-vintage toolchain still
+  # gets the fast parser.
   local cxx std tmp="$UNFURL_BIN.$$"
   for cxx in clang++ g++ c++; do
     command -v "$cxx" >/dev/null 2>&1 || continue
-    # C++26 is what the source targets; the older standards are only there so a
-    # 2023-vintage toolchain still gets the fast parser.
     for std in c++2c c++23 c++2b c++20; do
-      if "$cxx" "-std=$std" -O2 -o "$tmp" "$UNFURL_SRC" >>"$UNFURL_BUILD_LOG" 2>&1; then
+      if "$cxx" "-std=$std" -O2 -o "$tmp" \
+           "$UNFURL_SRC_DIR/html_meta.cpp" "$UNFURL_SRC_DIR/unfurl_main.cpp" \
+           >>"$UNFURL_BUILD_LOG" 2>&1; then
         mv -f "$tmp" "$UNFURL_BIN" && return 0
       fi
     done
@@ -764,13 +791,15 @@ build_unfurl_helper() {
   return 1
 }
 
-# Rebuild when the source is newer than the binary; remember a failure against
-# the source's timestamp so a machine with no compiler does not retry the build
+# Rebuild when a source is newer than the binary; remember a failure against
+# that source's timestamp so a machine with no compiler does not retry the build
 # on every single link.
 ensure_unfurl_helper() {
-  [[ -x "$UNFURL_BIN" && ! "$UNFURL_SRC" -nt "$UNFURL_BIN" ]] && return 0
+  local newest
+  newest="$(newest_unfurl_source)" || return 1
+  [[ -x "$UNFURL_BIN" && ! "$newest" -nt "$UNFURL_BIN" ]] && return 0
   local marker="$CACHE_DIR/bin/.build-failed"
-  if [[ -f "$marker" && ! "$UNFURL_SRC" -nt "$marker" ]]; then
+  if [[ -f "$marker" && ! "$newest" -nt "$marker" ]]; then
     return 1
   fi
   if build_unfurl_helper; then
@@ -811,9 +840,12 @@ url_is_crawlable() { # url_is_crawlable <url>
     localhost|*.localhost|*.local|*.internal|*.home.arpa|*.onion) return 1 ;;
     127.*|10.*|0.*|169.254.*|192.168.*|100.64.*) return 1 ;;
     172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 1 ;;
-    metadata.google.internal|instance-data|*\[*) return 1 ;;
   esac
-  # A bare number or an IPv6 literal without brackets: not a hostname we trust.
+  # Everything left has to look like a dotted public name. This is what rejects
+  # the rest of the awkward cases without needing a pattern each: a bare
+  # hostname (instance-data), a bracketed IPv6 literal (stripping the port left
+  # "["), an unbracketed one (stripping the port left nothing), and the cloud
+  # metadata names, which the *.internal rule above already covers.
   [[ "$host" == *.* ]] || return 1
   return 0
 }
@@ -844,6 +876,9 @@ unfurl_fallback() { # unfurl_fallback <url> <final-url> <body-file>
   site="$(_meta 'og:site_name')"
   unset -f _meta
 
+  # The curly quotes below are the replacement text for &#8217;/&#8216;, not
+  # stray shell quoting, which is what shellcheck sees them as.
+  # shellcheck disable=SC1112
   local decode='s/&amp;/\&/g; s/&quot;/"/g; s/&#0*39;/'"'"'/g; s/&apos;/'"'"'/g; s/&lt;/</g; s/&gt;/>/g; s/&nbsp;/ /g; s/&hellip;/…/g; s/&mdash;/—/g; s/&ndash;/–/g; s/&#8217;/’/g; s/&#8216;/‘/g'
   title="$(printf '%s' "$title" | sed -E "$decode" | tr -s ' ' | sed -E 's/^ +| +$//g' | cut -c1-300)"
   desc="$(printf '%s' "$desc" | sed -E "$decode" | tr -s ' ' | sed -E 's/^ +| +$//g' | cut -c1-600)"

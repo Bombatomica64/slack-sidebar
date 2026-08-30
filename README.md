@@ -177,19 +177,69 @@ What is and is not fetched:
 Reading metadata out of arbitrary HTML in an unknown encoding is the one part of
 this plugin that is not a good fit for shell: quoted, unquoted and bare
 attributes, comment and `<script>` skipping, entity decoding, cp1252 pages, and
-truncation that does not cut a UTF-8 character in half. `native/unfurl.cpp` does
-it in a single pass — C++26, built with clang (or gcc) at whatever standard the
-toolchain accepts, `c++2c` first:
+truncation that does not cut a UTF-8 character in half. `native/html_meta.cpp`
+does it in a single pass — C++26, built with clang or gcc at whatever standard
+the toolchain accepts, `c++2c` first.
+
+You do not have to build anything: the first link preview runs `make` for you
+and installs the helper into `~/.cache/noctalia-slack/bin/`, and if there is no
+compiler at all `slack.sh` falls back to a grep/sed parser that handles the
+common cases (it misses numeric HTML entities and unusual markup). The build is
+retried only when a source file changes, so a machine without a compiler does
+not pay for the attempt on every link.
+
+## Building
 
 ```sh
-./slack.sh build          # compiles it into ~/.cache/noctalia-slack/bin/
+make                 # build the helper into build/
+make test            # unit tests
+make check           # what CI gates on: strict warnings, tests, sanitizers, QML parse
+make install         # copy it where slack.sh looks
+make print-config    # which compiler and standard were chosen
 ```
 
-You do not have to run that: the first link preview builds it on demand, and if
-there is no compiler at all `slack.sh` falls back to a grep/sed parser that
-handles the common cases (it misses numeric HTML entities and unusual markup).
-The build is retried only when `unfurl.cpp` changes, so a machine without a
-compiler does not pay for the attempt on every link.
+Plain GNU make, no CMake: the native side is three translation units, and a
+generator that writes a build system to build three files is machinery nobody
+wants to review.
+
+| Knob | Effect |
+| --- | --- |
+| `CXX=g++` | pick a compiler (default: `clang++` if installed) |
+| `STRICT=1` | `-Werror` |
+| `SANITIZE=1` | AddressSanitizer + UndefinedBehaviorSanitizer |
+| `PORTABLE=1` | static libstdc++/libgcc, for release artifacts |
+
+The warning set is `-Wall -Wextra -Wpedantic` plus the conversion, shadow,
+old-style-cast and cast-alignment families — the ones that matter when the input
+is attacker-shaped bytes and every other line is an index or a shift — with
+`-D_GLIBCXX_ASSERTIONS`, `_FORTIFY_SOURCE` and a stack protector always on.
+
+`-Werror` is deliberately **not** the default. A compiler newer than any given
+commit will eventually invent a warning, and that must not be the thing that
+stops someone's link previews from building on first use. CI turns it on; your
+machine does not.
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+| Job | What it gates |
+| --- | --- |
+| `native` | builds and runs the tests under **both** clang and gcc with `-Werror` |
+| `sanitizers` | the same tests under ASan + UBSan, which is where a parser fed hostile bytes earns its test suite |
+| `qml` | parses every `.qml` with `qmlformat` |
+| `scripts` | `bash -n` and `shellcheck` on `slack.sh`, `py_compile` on `oauth-login.py`, and a check that every setting `Settings.qml` saves has a default in `manifest.json` |
+
+The QML job is a *parse* gate, not a lint. `qmllint` would be better, but it
+cannot resolve Noctalia's `qs.Commons` and `qs.Widgets` modules, so every run
+would be drowned in unresolved-import warnings. Parsing still catches the class
+of error that otherwise shows up as a silently blank sidebar.
+
+`.github/workflows/release.yml` runs on a `v*` tag: it checks the tag matches
+`manifest.json`, builds with static libstdc++, verifies the binary runs and has
+no libstdc++/libgcc in its needed list, and attaches it to the release with a
+`sha256`. That artifact is a convenience for machines with no compiler — the
+supported install path is still the clone, which builds the helper itself.
 
 Message text is rendered through `Components/Mrkdwn.js`: mentions, channel
 links, URLs, `*bold*`, `_italic_`, `~strike~`, inline code, fenced blocks,
@@ -245,7 +295,10 @@ The transcript is built to hold a steady frame at 120 Hz.
 | `Panel.qml` | the sidebar shell and view switching |
 | `BarWidget.qml` | bar entry and unread badge |
 | `Settings.qml` | side, width, intervals, notification toggles |
-| `native/unfurl.cpp` | C++26 HTML metadata parser behind the link previews |
+| `native/html_meta.{hpp,cpp}` | C++26 HTML metadata parser behind the link previews |
+| `native/unfurl_main.cpp` | its command-line front end (`slack-unfurl`) |
+| `native/tests/` | unit tests for the parser |
+| `Makefile` | builds the above; see **Building** |
 | `Components/` | `ConversationList`, `MessageList`, `MessageItem`, `SmoothList`, `LinkCard`, `Composer`, `Mrkdwn.js` |
 
 `slack.sh` is usable on its own:
@@ -264,7 +317,7 @@ The transcript is built to hold a steady frame at 120 Hz.
 ./slack.sh tokens                    # which identities are available
 ./slack.sh emoji                     # sync custom workspace emoji
 ./slack.sh unfurl https://example.com/a https://example.com/b
-./slack.sh build                     # compile the link-preview helper
+./slack.sh build                     # compile the link-preview helper (same as `make install`)
 ./slack.sh avatars                   # mirror profile pictures locally
 ./slack.sh credentials               # is the app able to sign in / renew?
 ./oauth-login.py https://localhost:3000   # the sign-in flow, standalone

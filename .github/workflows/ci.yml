@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: native (${{ matrix.cxx }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [clang++, g++]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the toolchain the build settled on
+        run: make CXX=${{ matrix.cxx }} print-config
+
+      # STRICT=1 is -Werror. It lives here rather than in the default build so
+      # that a compiler newer than this commit inventing a new warning breaks CI
+      # rather than someone's first link preview.
+      - name: Build and test with warnings as errors
+        run: make CXX=${{ matrix.cxx }} STRICT=1 all test
+
+  sanitizers:
+    name: sanitizers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The parser's whole job is to survive bytes chosen by someone else, so
+      # this is the pass that actually earns its runtime. gcc rather than clang
+      # only because its sanitizer runtime is always present on the runner.
+      - name: Tests under AddressSanitizer and UndefinedBehaviorSanitizer
+        run: make CXX=g++ STRICT=1 SANITIZE=1 test
+
+  qml:
+    name: qml syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt QML tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qt6-declarative-dev-tools
+
+      # A parse gate, not a lint: qmllint cannot resolve Noctalia's qs.Commons
+      # and qs.Widgets modules, so it would report nothing but unresolved
+      # imports. This catches the errors that would otherwise only show up as a
+      # blank sidebar at runtime.
+      - name: Parse every QML file
+        run: make QMLFORMAT=/usr/lib/qt6/bin/qmlformat qml
+
+  scripts:
+    name: shell, python, manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Shell syntax
+        run: bash -n slack.sh
+
+      # LC_ALL because shellcheck writes the offending line back out, and
+      # slack.sh contains non-ASCII replacement text.
+      - name: shellcheck
+        run: LC_ALL=C.UTF-8 shellcheck --severity=warning slack.sh
+
+      - name: Python syntax
+        run: python3 -m py_compile oauth-login.py
+
+      - name: Manifest is valid JSON, and its defaults match the settings pane
+        run: |
+          python3 - <<'PY'
+          import json, re, sys
+
+          manifest = json.load(open("manifest.json"))
+          defaults = manifest["metadata"]["defaultSettings"]
+
+          # Every setting the settings pane saves must have a default in the
+          # manifest, or it reads back as undefined on a fresh install.
+          saved = set(re.findall(r"pluginApi\.pluginSettings\.(\w+)\s*=", open("Settings.qml").read()))
+          missing = sorted(saved - set(defaults))
+          if missing:
+              sys.exit("Settings.qml saves keys with no manifest default: " + ", ".join(missing))
+
+          # Every entry point named in the manifest has to exist.
+          import os
+          for role, path in manifest["entryPoints"].items():
+              if not os.path.exists(path):
+                  sys.exit(f"entryPoints.{role} points at a missing file: {path}")
+
+          print(f"{len(defaults)} defaults, {len(manifest['entryPoints'])} entry points, all present")
+          PY

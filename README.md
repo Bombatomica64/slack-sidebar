@@ -9,11 +9,21 @@ the bottom.
 
 ## Install
 
-Requires **noctalia-shell 4.x** (developed against 4.7.7) and `curl`, `jq`,
-`secret-tool`, `python3`. Optional: `wl-copy` for the copy action, `notify-send`
-for notifications, `openssl` for the sign-in callback's local certificate, and a
-C++ compiler (`clang++` or `g++`) for the fast link-preview parser — without one
-the previews fall back to a shell parser.
+Requires **noctalia-shell 4.x** (developed against 4.7.7).
+
+All Slack access goes through `slack-agent`, a compiled binary the plugin builds
+for itself on first run, so the machine needs a toolchain:
+
+| | |
+| --- | --- |
+| Debian / Ubuntu | `apt install make clang qt6-base-dev libsecret-1-dev libssl-dev` |
+| Arch | `pacman -S make clang qt6-base libsecret openssl` |
+| Fedora | `dnf install make clang qt6-qtbase-devel libsecret-devel openssl-devel` |
+
+**clang 17 or newer.** gcc cannot build this — see
+[Modules](#modules-and-the-compiler-floor-they-cost) for the details.
+Optional at runtime: `wl-copy` for the copy action, `notify-send` for
+notifications, `xdg-open` to open links and the sign-in page.
 
 ```sh
 git clone https://github.com/Bombatomica64/slack-sidebar.git ~/.config/noctalia/plugins/slack
@@ -21,6 +31,12 @@ git clone https://github.com/Bombatomica64/slack-sidebar.git ~/.config/noctalia/
 
 Then enable **Slack** in Noctalia's Settings → Plugins, and add its widget to the
 bar. The directory name must be `slack`, matching the `id` in `manifest.json`.
+
+The first time the plugin starts it runs `make install` for you, into
+`~/.cache/noctalia-slack/bin/`, and says so in the header while it does. If that
+fails the header explains what is missing; `make` in the plugin directory shows
+the real error. If you would rather not build anything, each release also ships
+a prebuilt `slack-agent` — drop it in that directory.
 
 While hacking on it, turn on the per-plugin hot reload (the bug icon on the
 plugin card) — it only appears when the shell runs with `NOCTALIA_DEBUG=1`.
@@ -30,12 +46,9 @@ keep loading the previously compiled QML.
 
 ## Setup
 
-Tokens live only in the OS keyring; nothing is written to a config file.
-
-```sh
-secret-tool store --label="Slack User Token" service slack-agents account user-token
-secret-tool store --label="Slack Bot Token"  service slack-agents account bot-token   # optional
-```
+Tokens live only in the OS keyring (read and written through libsecret);
+nothing is written to a config file. You do not have to put them there yourself
+— signing in does it.
 
 Signing in happens in the plugin — there is no code to copy anywhere:
 
@@ -46,7 +59,7 @@ Signing in happens in the plugin — there is no code to copy anywhere:
    **Redirect URL** (default `https://localhost:3000`) and Save.
 3. Sidebar → click the account chip → **Sign in with Slack**.
 
-`oauth-login.py` then serves that redirect on loopback, opens the browser, and
+`slack-agent signin` then serves that redirect on loopback, opens the browser, and
 receives the callback itself: it verifies `state`, exchanges the code, and stores
 the access and refresh tokens. Because Slack treats a loopback redirect as a
 non-web URI it requires PKCE, so the flow always sends `code_challenge` (S256)
@@ -71,7 +84,7 @@ Scopes requested:
 Apps with rotation enabled issue `xoxe.xoxp-…` access tokens that expire (~12h)
 plus a refresh token, rather than a permanent `xoxp-…`. Both prefixes are
 recognised. Signing in stores the refresh token alongside the access
-token, and `slack.sh` renews it by itself when Slack answers `token_expired` — under `flock`, so concurrent calls rotate it
+token, and the agent renews it by itself when Slack answers `token_expired` — under `flock`, so concurrent calls rotate it
 once rather than racing.
 
 If a rotating token is stored *without* a refresh token it works until it
@@ -117,7 +130,7 @@ matches. With it set, both identities count as "you".
 ## How unread is computed
 
 Slack's `conversations.info` returns `unread_count`/`last_read` for DMs but not
-reliably for channels, so unread is computed locally: `slack.sh` keeps a read
+reliably for channels, so unread is computed locally: the agent keeps a read
 cursor per conversation in `${XDG_STATE_HOME:-~/.local/state}/noctalia-slack/cursors.json`
 and counts anything newer that isn't yours. Every few minutes `sync-read`
 reconciles those cursors with Slack's own read state, so reading a channel on
@@ -159,7 +172,7 @@ blockquotes and `:emoji:`.
   a fallback: it is keyed by CLDR description (`face_with_tears_of_joy`) rather
   than Slack shortcode (`joy`), and testing it against known-correct codes
   resolved only 77 of 164 — 12 of those to the wrong glyph.
-- **Custom workspace emoji** work. `slack.sh emoji` mirrors them from
+- **Custom workspace emoji** work. `slack-agent emoji` mirrors them from
   `emoji.list` into `~/.cache/noctalia-slack/emoji-img/` once and renders them
   inline as local images, including one level of `alias:` indirection. Remote
   URLs are not used directly because Qt rich text loads them unreliably.
@@ -170,7 +183,7 @@ blockquotes and `:emoji:`.
 
 Slack unfurls some links itself and sends the result in `attachments`; those are
 drawn as-is. Every other `<https://…>` in a message is crawled here:
-`slack.sh unfurl` fetches the page and reads its OpenGraph/Twitter-card
+`slack-agent unfurl` fetches the page and reads its OpenGraph/Twitter-card
 metadata, mirrors the preview image and favicon into
 `~/.cache/noctalia-slack/unfurl-img/`, and caches the card in
 `~/.cache/noctalia-slack/unfurl/` for a week (six hours for a page that failed,
@@ -187,7 +200,10 @@ What is and is not fetched:
 - Redirects are followed at most four times and stay on http(s); the response is
   capped and the whole fetch times out in twelve seconds.
 - Only the links Slack itself renders as links (its `<…>` entity form) are
-  crawled, at most 24 per call and 3 previews per message.
+  crawled, at most 24 per call and 3 previews per message. Addresses are judged
+  with `QHostAddress` rather than by prefix matching, so a literal loopback,
+  link-local, site-local, multicast or broadcast address is refused whatever
+  form it is written in.
 - The fetch is a plain unauthenticated GET from your machine, exactly as if you
   had opened the link — the page learns your IP, and nothing else.
 
@@ -209,12 +225,7 @@ implementation into a plugin people install by cloning. The scanner is ~250
 lines, never allocates a tree, and is fuzzed. If it ever needs to answer
 questions about the document *body*, that trade flips and a library wins.
 
-You do not have to build anything: the first link preview runs `make` for you
-and installs the helper into `~/.cache/noctalia-slack/bin/`, and if there is no
-compiler at all `slack.sh` falls back to a grep/sed parser that handles the
-common cases (it misses numeric HTML entities and unusual markup). The build is
-retried only when a source file changes, so a machine without a compiler does
-not pay for the attempt on every link.
+It is part of `slack-agent`, so it is built with everything else.
 
 ## Building
 
@@ -223,7 +234,7 @@ make                 # build the helper into build/
 make test            # unit tests
 make fuzz            # fuzz the parser (clang only; FUZZ_TIME=300 for longer)
 make check           # what CI gates on: strict warnings, tests, sanitizers, QML parse
-make install         # copy it where slack.sh looks
+make install         # install the agent where the plugin looks for it
 make print-config    # which compiler, standard and version were chosen
 ```
 
@@ -241,15 +252,24 @@ wants to review.
 
 ### Modules, and the compiler floor they cost
 
-The parser is a **C++20 named module** (`native/html_meta.cppm`), not a
-header/source pair: one file per component instead of two that have to be kept
-in step, and nothing escapes it but what `export` names.
+Our own code is **C++20 named modules** (`native/*.cppm`), not header/source
+pairs: one file per component instead of two that have to be kept in step, and
+nothing escapes one but what `export` names. Qt, libsecret and OpenSSL come in
+as ordinary `#include`s inside each module's global module fragment — Qt does
+not ship as modules, and will not while it still supports header-only use.
 
-That costs a compiler floor — **clang ≥ 17 or gcc ≥ 14** — and the Makefile
-refuses anything older by version rather than letting you discover why the hard
-way. gcc 13, still the default on Ubuntu 24.04 LTS, *segfaults* compiling a
-four-line program that imports a module and uses `std::string` at `-O2`. That is
-not something a build can work around.
+That costs a compiler floor, and the floor turned out to be **clang only**:
+
+| | |
+| --- | --- |
+| clang 17+ | works |
+| gcc 13 | *segfaults* compiling a four-line program that imports a module and uses `std::string` at `-O2`. Still the default on Ubuntu 24.04 LTS. |
+| gcc 14 | internal compiler error on this code under every flag combination tried — `gen_enumeration_type_die` (dwarf2out.cc) with debug info, `nothrow_spec_p` (cp/except.cc) without it |
+
+Modules plus Qt headers of this size is simply more than gcc's implementation
+currently handles. gcc 15 may well be fine; nothing here could test it, so the
+Makefile refuses gcc with that explanation and `ALLOW_GCC=1` lifts the gate for
+anyone who wants to find out. The gcc module build rules are kept for that day.
 
 Three consequences worth knowing:
 
@@ -260,13 +280,26 @@ Three consequences worth knowing:
   gcc (13 and 14 alike) does not reconcile a std header included in the importer
   with the same header pulled in by the module's global module fragment, and
   reports every entity in it as a redefinition. Includes first, imports second.
-- **The sanitized and fuzzed builds are clang-only.** gcc 14 hits an internal
-  compiler error (`cp/module.cc:9455`) compiling a module unit with `-fsanitize`
-  at all. `make check` under gcc says so and carries on; `make SANITIZE=1` under
-  gcc refuses with the reason.
+- **`-Wmissing-declarations` is clang-only.** It exists to catch a function in a
+  `.cpp` that should have been `static`, and gcc applies it to module interface
+  units too, where every exported definition *is* its declaration.
+- **`QStringLiteral` cannot be used in a module purview here.** It expands to a
+  call to `QtPrivate::qMakeStringPrivate`, which Qt declares `static` — a
+  TU-local entity, and a module interface may not expose one. It compiles in a
+  module that imports nothing and stops compiling the moment that module gains
+  an import, so rather than leave a landmine, nothing uses it: string constants
+  go through `slack::util::qs()`.
 
-If your compiler is too old, nothing breaks: `slack.sh` falls back to its
-grep/sed parser and link previews keep working, slightly less well.
+If your compiler cannot build it the plugin cannot run at all — every Slack call
+goes through this binary — so the build refuses with a message naming what does
+work, and each release ships a prebuilt `slack-agent` to drop into
+`~/.cache/noctalia-slack/bin/`.
+
+One more rule worth knowing, since breaking it is silent until it is not:
+exported functions in these modules are deliberately **not `inline`**. An
+exported inline function may not name a TU-local entity, and most of them call
+helpers from an anonymous namespace; each module is a single translation unit,
+so `inline` was buying nothing anyway. gcc diagnoses this, clang does not.
 
 ### Fuzzing
 
@@ -301,11 +334,11 @@ machine does not.
 
 | Job | What it gates |
 | --- | --- |
-| `native` | builds and runs the tests under **both** clang and gcc-14 with `-Werror` |
+| `native` | builds and runs the tests with `-Werror`, then checks the agent answers with no keyring and refuses a loopback URL |
 | `sanitizers` | the same tests under ASan + UBSan (clang) |
 | `fuzz` | two minutes of libFuzzer over the parser, uploading any crashing input as an artifact |
 | `qml` | parses every `.qml` with `qmlformat` |
-| `scripts` | `bash -n` and `shellcheck` on `slack.sh`, `py_compile` on `oauth-login.py`, and a check that every setting `Settings.qml` saves has a default in `manifest.json` |
+| `plugin` | every setting `Settings.qml` saves has a default in `manifest.json`, every manifest entry point exists, and no QML still reaches for the retired scripts |
 
 The QML job is a *parse* gate, not a lint. `qmllint` would be better, but it
 cannot resolve Noctalia's `qs.Commons` and `qs.Widgets` modules, so every run
@@ -313,10 +346,11 @@ would be drowned in unresolved-import warnings. Parsing still catches the class
 of error that otherwise shows up as a silently blank sidebar.
 
 `.github/workflows/release.yml` runs on a `v*` tag: it checks the tag matches
-`manifest.json`, builds with static libstdc++, verifies the binary runs and has
-no libstdc++/libgcc in its needed list, and attaches it to the release with a
-`sha256`. That artifact is a convenience for machines with no compiler — the
-supported install path is still the clone, which builds the helper itself.
+`manifest.json`, builds with static libstdc++, verifies the binary runs, and
+attaches it to the release with a `sha256`. Since the plugin cannot work without
+the binary, that artifact is the escape hatch for a machine whose compiler is
+too old — drop it into `~/.cache/noctalia-slack/bin/` and the plugin will use
+it.
 
 ## Scrolling
 
@@ -347,40 +381,47 @@ The transcript is built to hold a steady frame at 120 Hz.
 
 | File | Role |
 | --- | --- |
-| `slack.sh` | all Slack access; every subcommand prints one JSON object |
-| `oauth-login.py` | OAuth2 sign-in: loopback callback listener, PKCE, token storage |
+| `native/agent_main.cpp` | `slack-agent`: subcommand dispatch |
+| `native/api.cppm` | Slack Web API, token selection and rotation |
+| `native/store.cppm` | conversation, user and read-cursor caches |
+| `native/commands.cppm` | one function per subcommand |
+| `native/oauth.cppm` | OAuth2 sign-in: loopback TLS listener, PKCE, token storage |
+| `native/net.cppm` | HTTP on Qt Network, several requests in flight at once |
+| `native/keyring.cppm` | the OS keyring, through libsecret |
+| `native/util.cppm` | paths, atomic writes, the JSON output contract |
 | `Main.qml` | state, polling cadence, notifications |
 | `Panel.qml` | the sidebar shell and view switching |
 | `BarWidget.qml` | bar entry and unread badge |
 | `Settings.qml` | side, width, intervals, notification toggles |
-| `native/html_meta.cppm` | C++26 HTML metadata parser behind the link previews, as a named module |
-| `native/unfurl_main.cpp` | its command-line front end (`slack-unfurl`) |
+| `native/html.cppm` | HTML metadata parser behind the link previews |
 | `native/tests/` | unit tests, the fuzz target and its corpus |
-| `Makefile` | builds the above; see **Building** |
+| `Makefile` | builds all of the above; see **Building** |
 | `Components/` | `ConversationList`, `MessageList`, `MessageItem`, `SmoothList`, `LinkCard`, `Composer`, `Mrkdwn.js` |
 
-`slack.sh` is usable on its own:
+`slack-agent` is usable on its own. Every subcommand prints one JSON object and
+exits 0; errors are `{"ok":false,"error":"..."}`, so nothing downstream has to
+read exit codes or stderr.
 
 ```sh
-./slack.sh me
-./slack.sh list                      # joined conversations + browsable public channels
-./slack.sh --me U01ABCDEFGH history C0123 30   # attribute messages to a given account
-./slack.sh join C0123
-./slack.sh poll C0123,D0456
-./slack.sh replies C0123 1787123637.474259
-./slack.sh send C0123 "hello"
-./slack.sh read C0123 1787123637.474259
-./slack.sh react C0123 1787123637.474259 thumbsup
-./slack.sh --token bot me            # force an identity
-./slack.sh tokens                    # which identities are available
-./slack.sh emoji                     # sync custom workspace emoji
-./slack.sh unfurl https://example.com/a https://example.com/b
-./slack.sh build                     # compile the link-preview helper (same as `make install`)
-./slack.sh avatars                   # mirror profile pictures locally
-./slack.sh credentials               # is the app able to sign in / renew?
-./oauth-login.py https://localhost:3000   # the sign-in flow, standalone
-./slack.sh reset            # drop the conversation/user/identity caches
-```
+agent=~/.cache/noctalia-slack/bin/slack-agent
 
-Requires `curl`, `jq`, `secret-tool`; `wl-copy` for the copy action and
-`notify-send` for notifications.
+$agent me
+$agent list                     # joined conversations + browsable public channels
+$agent --me U01ABCDEFGH history C0123 30   # attribute messages to a given account
+$agent join C0123
+$agent poll C0123,D0456
+$agent replies C0123 1787123637.474259
+$agent send C0123 "hello"
+$agent read C0123 1787123637.474259
+$agent react C0123 1787123637.474259 thumbsup
+$agent --token bot me           # force an identity
+$agent tokens                   # which identities are available
+$agent emoji                    # sync custom workspace emoji
+$agent avatars                  # mirror profile pictures locally
+$agent unfurl https://example.com/a https://example.com/b
+$agent credentials              # is the app able to sign in / renew?
+$agent signin https://localhost:3000
+$agent reset                    # drop the conversation/user/identity caches
+
+curl -sL https://example.com | $agent parse-html https://example.com   # the parser alone
+```

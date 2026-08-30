@@ -30,35 +30,38 @@ jobs:
             exit 1
           fi
 
-      # gcc rather than clang for the release build: the runner's gcc is the
-      # oldest toolchain we support, so a binary it produces is the one most
-      # likely to load on someone else's distro.
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang qt6-base-dev libsecret-1-dev libssl-dev
+
       - name: Build
-        run: make CXX=g++ STRICT=1 PORTABLE=1 all
+        run: make CXX=clang++ STRICT=1 PORTABLE=1 all
 
       - name: Verify the binary runs and is self-contained
         run: |
-          # libstdc++ and libgcc are linked statically; anything else left in
-          # the needed list would be a dependency we cannot promise the user has.
-          ldd build/slack-unfurl || true
-          if ldd build/slack-unfurl | grep -qE 'libstdc\+\+|libgcc_s'; then
+          # Qt, libsecret and OpenSSL are expected in the needed list - they are
+          # runtime dependencies the user's distro provides. libstdc++ is not:
+          # it is statically linked so the binary loads on older distros too.
+          ldd build/slack-agent || true
+          if ldd build/slack-agent | grep -qE 'libstdc\+\+|libgcc_s'; then
             echo "binary still links libstdc++/libgcc dynamically" >&2
             exit 1
           fi
           printf '<html><head><meta property="og:title" content="smoke"></head></html>' \
-            | ./build/slack-unfurl https://example.com/ | tee /dev/stderr | grep -q '"title":"smoke"'
+            | ./build/slack-agent parse-html https://example.com/ | tee /dev/stderr | grep -q '"title":"smoke"'
 
       - name: Name the artifact after the platform it was built for
         id: artifact
         run: |
-          name="slack-unfurl-$(uname -m)-linux-gnu"
-          cp build/slack-unfurl "$name"
+          name="slack-agent-$(uname -m)-linux-gnu"
+          cp build/slack-agent "$name"
           sha256sum "$name" > "$name.sha256"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
-      # The plugin builds this helper itself on first use, so the release
-      # artifact is a convenience for machines with no compiler, not the
-      # supported install path.
+      # The plugin builds this itself on first run; the artifact is the escape
+      # hatch for a machine whose compiler is too old for C++20 modules.
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}

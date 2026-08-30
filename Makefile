@@ -7,7 +7,7 @@
 #   make                 build the helpers into build/
 #   make test            build and run the unit tests
 #   make check           the full CI gate: strict warnings, tests, sanitizers
-#   make install         copy the helpers where slack.sh looks for them
+#   make install         install the agent where the plugin looks for it
 #   make clean
 #
 # Knobs:
@@ -40,19 +40,37 @@ endif
 CXX_IS_CLANG := $(shell $(CXX) --version 2>/dev/null | grep -qi clang && echo 1)
 CXX_MAJOR    := $(firstword $(subst ., ,$(shell $(CXX) -dumpfullversion -dumpversion 2>/dev/null)))
 
-# The library is a C++20 named module, and module support is where the two
-# compilers most recently grew up. gcc 13 - still the default on Ubuntu 24.04
-# LTS - segfaults compiling a four-line program that imports a module and uses
-# std::string at -O2, so there is no version of "try anyway" worth offering.
+# Our own code is C++20 named modules, and module support is where the compilers
+# most recently grew up. This build is clang-only, and not by preference:
+#
+#   gcc 13  segfaults compiling a four-line program that imports a module and
+#           uses std::string at -O2. It is still the default on Ubuntu 24.04 LTS.
+#   gcc 14  ICEs on this code under every flag combination tried - in
+#           gen_enumeration_type_die (dwarf2out.cc) with debug info, and in
+#           nothrow_spec_p (cp/except.cc) without it. Modules plus Qt headers of
+#           this size is more than its implementation handles.
+#
+# gcc 15 may well be fine; nothing here could test it. ALLOW_GCC=1 lifts the
+# gate for anyone who wants to find out, rather than making that a patch.
 ifeq ($(CXX_IS_CLANG),1)
   CXX_MIN := 17
 else
-  CXX_MIN := 14
+  CXX_MIN := 15
+  ifneq ($(ALLOW_GCC),1)
+    ifneq ($(shell test "$(CXX_MAJOR)" -ge 15 2>/dev/null && echo ok),ok)
+      $(error $(CXX) is gcc $(CXX_MAJOR), which cannot compile C++20 modules against Qt - \
+        gcc 13 segfaults and gcc 14 hits an internal compiler error. Use `make CXX=clang++` \
+        (clang 17 or newer). ALLOW_GCC=1 tries anyway. Each release also ships a prebuilt \
+        binary, if building is not an option.)
+    endif
+  endif
 endif
 ifneq ($(shell test "$(CXX_MAJOR)" -ge "$(CXX_MIN)" 2>/dev/null && echo ok),ok)
-$(error $(CXX) is version $(CXX_MAJOR); C++20 modules need clang >= 17 or gcc >= 14. \
-  Try `make CXX=g++-14` or `make CXX=clang++`. The plugin does not need this built - \
-  without it, link previews fall back to slack.sh's shell parser.)
+ifneq ($(ALLOW_GCC),1)
+$(error $(CXX) is version $(CXX_MAJOR); this needs clang >= 17. The plugin cannot run \
+  without this binary - every Slack call goes through it - so a release build is also \
+  attached to each tag.)
+endif
 endif
 
 # Everything that has ever caught a real bug in this code, plus the conversion
@@ -62,12 +80,17 @@ WARNINGS := \
 	-Wall -Wextra -Wpedantic \
 	-Wshadow -Wconversion -Wsign-conversion -Wold-style-cast \
 	-Wcast-qual -Wcast-align -Wdouble-promotion -Wformat=2 \
-	-Wimplicit-fallthrough -Wmissing-declarations -Wnon-virtual-dtor \
+	-Wimplicit-fallthrough -Wnon-virtual-dtor \
 	-Woverloaded-virtual -Wnull-dereference -Wundef -Wunused -Wextra-semi \
 	-Wswitch-default -Wredundant-decls -Wwrite-strings
 
 ifeq ($(CXX_IS_CLANG),1)
-  WARNINGS += -Wloop-analysis -Wrange-loop-analysis -Wunreachable-code
+  # -Wmissing-declarations is clang-only here, not by preference: it exists to
+  # catch a function in a .cpp that should have been static, and gcc applies it
+  # to module interface units too, where every exported definition *is* its
+  # declaration. clang understands module linkage and only warns where it means
+  # something.
+  WARNINGS += -Wloop-analysis -Wrange-loop-analysis -Wunreachable-code -Wmissing-declarations
 else
   WARNINGS += -Wduplicated-cond -Wduplicated-branches -Wlogical-op -Wuseless-cast
 endif
@@ -117,6 +140,26 @@ ifeq ($(SANITIZE),1)
   BUILD_LDFLAGS  += $(SAN)
 endif
 
+# Qt and the C libraries the agent needs. Discovered with pkg-config rather than
+# hardcoded: the Qt include layout differs between distros, and a missing
+# development package should say which one by name.
+DEP_PACKAGES := Qt6Core Qt6Network libsecret-1 openssl
+DEP_MISSING  := $(strip $(foreach p,$(DEP_PACKAGES),$(if $(shell pkg-config --exists $(p) && echo 1),,$(p))))
+ifneq ($(DEP_MISSING),)
+  ifneq ($(MAKECMDGOALS),help)
+    $(warning missing development packages: $(DEP_MISSING))
+    $(warning on Debian/Ubuntu: apt install qt6-base-dev libsecret-1-dev libssl-dev)
+    $(warning on Arch: pacman -S qt6-base libsecret openssl)
+  endif
+endif
+# -isystem, not -I: Qt's and glib's headers do not compile clean under this
+# warning set (old-style casts in glib, sign conversions in qversiontagging),
+# and holding somebody else's headers to our -Werror is not a thing that can be
+# won. Ours stay strict; theirs are system headers.
+DEP_CFLAGS := $(patsubst -I%,-isystem %,$(shell pkg-config --cflags $(DEP_PACKAGES) 2>/dev/null)) -fPIC \
+	-DQT_NO_KEYWORDS -DQT_DISABLE_DEPRECATED_UP_TO=0x060400
+DEP_LIBS   := $(shell pkg-config --libs $(DEP_PACKAGES) 2>/dev/null)
+
 # QML has no compiler to run in CI, but qmlformat parses it, and a parse gate is
 # most of what a QML syntax error costs you. qmllint would be better still and
 # is deliberately not used: it cannot resolve Noctalia's qs.Commons/qs.Widgets
@@ -132,77 +175,102 @@ endif
 
 # ---------------------------------------------------------------- modules
 #
-# The library is a C++20 named module, so a module unit has to be compiled
-# before anything that imports it, and the two compilers spell that completely
-# differently. This is the whole cost of using modules in a hand-written build,
-# and at this size it is about fifteen lines:
+# Our own code is C++20 named modules; Qt and the C libraries come in as
+# ordinary includes inside each module's global module fragment, because Qt does
+# not ship as modules and will not until it stops supporting header-only use.
+#
+# native/<name>.cppm declares module slack.<name>, compiles to $(BUILDDIR)/
+# <name>.o and produces a binary module interface beside it. A module unit has
+# to be built before anything that imports it, and the two compilers spell that
+# completely differently:
 #
 #   clang  --precompile writes a .pcm, which is then compiled to an object like
 #          any other TU; importers find it via -fprebuilt-module-path.
 #   gcc    compiles the module unit straight to an object and writes a .gcm on
-#          the side. Where that .gcm lands is decided by a mapper file, which is
-#          how the build keeps binary module interfaces out of the source tree
-#          (gcc's default is a gcm.cache/ directory next to wherever it was run,
-#          and this build is often run from someone's checkout).
-MODULE_NAME := slack.html
-MODULE_SRC  := native/html_meta.cppm
-MODULE_OBJ  := $(BUILDDIR)/html_meta.o
+#          the side, placed by a mapper file so binary module interfaces stay
+#          out of the source tree. Kept for whenever gcc can compile this again
+#          (see the compiler gate above); reachable with ALLOW_GCC=1.
+#
+# The import graph is written out below rather than scanned for: eight modules
+# in a DAG that changes about once a year does not justify clang-scan-deps and
+# a two-phase build.
+MODULE_NAMES := html util keyring net api store oauth commands
+MODULE_SRCS  := $(MODULE_NAMES:%=native/%.cppm)
+MODULE_OBJS  := $(MODULE_NAMES:%=$(BUILDDIR)/%.o)
 
 ifeq ($(CXX_IS_CLANG),1)
-  MODULE_BMI   := $(BUILDDIR)/$(MODULE_NAME).pcm
-  MODULE_IMPORT = -fprebuilt-module-path=$(BUILDDIR)
+  BMI_EXT       := pcm
+  MODULE_IMPORT  = -fprebuilt-module-path=$(BUILDDIR)
 else
-  MODULE_BMI   := $(BUILDDIR)/$(MODULE_NAME).gcm
-  MODULE_MAP   := $(BUILDDIR)/modules.map
-  MODULE_FLAGS  = -fmodules-ts -fmodule-mapper=$(MODULE_MAP)
-  MODULE_IMPORT = $(MODULE_FLAGS)
+  BMI_EXT       := gcm
+  MODULE_MAP    := $(BUILDDIR)/modules.map
+  MODULE_FLAGS   = -fmodules-ts -fmodule-mapper=$(MODULE_MAP)
+  MODULE_IMPORT  = $(MODULE_FLAGS)
 endif
 
-UNFURL_SRC := native/unfurl_main.cpp
-TEST_SRC   := native/tests/html_meta_test.cpp
-FUZZ_SRC   := native/tests/html_meta_fuzz.cpp
-CORPUS     := native/tests/corpus
+MODULE_BMIS := $(MODULE_NAMES:%=$(BUILDDIR)/slack.%.$(BMI_EXT))
 
-UNFURL := $(BUILDDIR)/slack-unfurl
-TEST   := $(BUILDDIR)/html_meta_test
-FUZZ   := $(BUILDDIR)/html_meta_fuzz
+AGENT_SRC := native/agent_main.cpp
+TEST_SRC  := native/tests/html_meta_test.cpp
+FUZZ_SRC  := native/tests/html_meta_fuzz.cpp
+CORPUS    := native/tests/corpus
+
+AGENT := $(BUILDDIR)/slack-agent
+TEST  := $(BUILDDIR)/html_meta_test
+FUZZ  := $(BUILDDIR)/html_meta_fuzz
 
 .PHONY: all test check qml fuzz install uninstall clean help print-config
 
-all: $(UNFURL)
+all: $(AGENT)
 
 ifeq ($(CXX_IS_CLANG),1)
 
-$(MODULE_BMI): $(MODULE_SRC) | $(BUILDDIR)
-	$(CXX) $(BUILD_CXXFLAGS) --precompile -o $@ $<
+$(BUILDDIR)/slack.%.pcm: native/%.cppm | $(BUILDDIR)
+	$(CXX) $(BUILD_CXXFLAGS) $(DEP_CFLAGS) $(MODULE_IMPORT) --precompile -o $@ $<
 
-$(MODULE_OBJ): $(MODULE_BMI)
-	$(CXX) $(BUILD_CXXFLAGS) -c -o $@ $<
+# No DEP_CFLAGS here: the interface is already compiled, the include paths would
+# go unused, and clang makes an unused flag an error once -Werror is on.
+$(BUILDDIR)/%.o: $(BUILDDIR)/slack.%.pcm
+	$(CXX) $(BUILD_CXXFLAGS) $(MODULE_IMPORT) -c -o $@ $<
 
 else
 
 $(MODULE_MAP): | $(BUILDDIR)
-	@printf '%s %s\n' $(MODULE_NAME) $(MODULE_BMI) > $@
+	@for m in $(MODULE_NAMES); do printf 'slack.%s %s/slack.%s.gcm\n' $$m $(BUILDDIR) $$m; done > $@
 
 # gcc emits the .gcm as a side effect of compiling the module unit, so the
-# object is the target and the BMI comes along with it.
-$(MODULE_OBJ): $(MODULE_SRC) $(MODULE_MAP) | $(BUILDDIR)
-	$(CXX) $(BUILD_CXXFLAGS) $(MODULE_FLAGS) -x c++ -c -o $@ $<
+# object is the target and the interface comes along with it.
+$(BUILDDIR)/%.o: native/%.cppm $(MODULE_MAP) | $(BUILDDIR)
+	$(CXX) $(BUILD_CXXFLAGS) $(DEP_CFLAGS) $(MODULE_FLAGS) -x c++ -c -o $@ $<
 
-$(MODULE_BMI): $(MODULE_OBJ)
+$(BUILDDIR)/slack.%.gcm: $(BUILDDIR)/%.o ;
 
 endif
 
-$(BUILDDIR)/unfurl_main.o: $(UNFURL_SRC) $(MODULE_BMI) | $(BUILDDIR)
-	$(CXX) $(BUILD_CXXFLAGS) $(MODULE_IMPORT) -c -o $@ $<
+# The import graph. Left imports right.
+$(BUILDDIR)/slack.net.$(BMI_EXT):      $(BUILDDIR)/slack.util.$(BMI_EXT)
+$(BUILDDIR)/slack.api.$(BMI_EXT):      $(BUILDDIR)/slack.util.$(BMI_EXT) $(BUILDDIR)/slack.keyring.$(BMI_EXT) $(BUILDDIR)/slack.net.$(BMI_EXT)
+$(BUILDDIR)/slack.store.$(BMI_EXT):    $(BUILDDIR)/slack.util.$(BMI_EXT) $(BUILDDIR)/slack.api.$(BMI_EXT)
+$(BUILDDIR)/slack.oauth.$(BMI_EXT):    $(BUILDDIR)/slack.util.$(BMI_EXT) $(BUILDDIR)/slack.keyring.$(BMI_EXT) $(BUILDDIR)/slack.net.$(BMI_EXT)
+$(BUILDDIR)/slack.commands.$(BMI_EXT): $(BUILDDIR)/slack.util.$(BMI_EXT) $(BUILDDIR)/slack.keyring.$(BMI_EXT) $(BUILDDIR)/slack.net.$(BMI_EXT) \
+                                       $(BUILDDIR)/slack.api.$(BMI_EXT) $(BUILDDIR)/slack.store.$(BMI_EXT) \
+                                       $(BUILDDIR)/slack.oauth.$(BMI_EXT) $(BUILDDIR)/slack.html.$(BMI_EXT)
 
-$(BUILDDIR)/html_meta_test.o: $(TEST_SRC) $(MODULE_BMI) | $(BUILDDIR)
-	$(CXX) $(BUILD_CXXFLAGS) $(MODULE_IMPORT) -c -o $@ $<
+$(BUILDDIR)/agent_main.o: $(AGENT_SRC) $(MODULE_BMIS) | $(BUILDDIR)
+	$(CXX) $(BUILD_CXXFLAGS) $(DEP_CFLAGS) $(MODULE_IMPORT) -c -o $@ $<
 
-$(UNFURL): $(MODULE_OBJ) $(BUILDDIR)/unfurl_main.o
-	$(CXX) $(BUILD_CXXFLAGS) -o $@ $^ $(BUILD_LDFLAGS)
+# DEP_CFLAGS even though the tests need no Qt: a binary module interface records
+# the configuration it was built under, and importing a -pthread BMI from a
+# compilation without it is rejected as a mismatch.
+$(BUILDDIR)/html_meta_test.o: $(TEST_SRC) $(BUILDDIR)/slack.html.$(BMI_EXT) | $(BUILDDIR)
+	$(CXX) $(BUILD_CXXFLAGS) $(DEP_CFLAGS) $(MODULE_IMPORT) -c -o $@ $<
 
-$(TEST): $(MODULE_OBJ) $(BUILDDIR)/html_meta_test.o
+$(AGENT): $(MODULE_OBJS) $(BUILDDIR)/agent_main.o
+	$(CXX) $(BUILD_CXXFLAGS) -o $@ $^ $(DEP_LIBS) $(BUILD_LDFLAGS)
+
+# The tests cover the pure parser, which imports nothing else and needs none of
+# the libraries the agent links.
+$(TEST): $(BUILDDIR)/html.o $(BUILDDIR)/html_meta_test.o
 	$(CXX) $(BUILD_CXXFLAGS) -o $@ $^ $(BUILD_LDFLAGS)
 
 $(BUILDDIR):
@@ -239,12 +307,12 @@ qml:
 # reads bytes chosen by whoever owns the page behind a pasted link.
 #
 #   make fuzz FUZZ_TIME=300      longer local run
-$(FUZZ): $(FUZZ_SRC) $(MODULE_BMI) $(MODULE_OBJ) | $(BUILDDIR)
+$(FUZZ): $(FUZZ_SRC) $(BUILDDIR)/slack.html.$(BMI_EXT) $(BUILDDIR)/html.o | $(BUILDDIR)
 	@if [ "$(CXX_IS_CLANG)" != "1" ]; then \
 	  echo "fuzzing needs clang (libFuzzer); try make fuzz CXX=clang++" >&2; exit 1; \
 	fi
-	$(CXX) $(BUILD_CXXFLAGS) $(MODULE_IMPORT) -fsanitize=fuzzer,address,undefined \
-	  -o $@ $(FUZZ_SRC) $(MODULE_OBJ)
+	$(CXX) $(BUILD_CXXFLAGS) $(DEP_CFLAGS) $(MODULE_IMPORT) -fsanitize=fuzzer,address,undefined \
+	  -o $@ $(FUZZ_SRC) $(BUILDDIR)/html.o
 
 FUZZ_TIME ?= 60
 
@@ -253,13 +321,13 @@ fuzz: $(FUZZ)
 	$(FUZZ) -max_total_time=$(FUZZ_TIME) -max_len=65536 -print_final_stats=1 \
 	  $(BUILDDIR)/corpus $(CORPUS)
 
-install: $(UNFURL)
+install: $(AGENT)
 	@mkdir -p $(BINDIR)
-	install -m 0755 $(UNFURL) $(BINDIR)/slack-unfurl
-	@echo "installed $(BINDIR)/slack-unfurl"
+	install -m 0755 $(AGENT) $(BINDIR)/slack-agent
+	@echo "installed $(BINDIR)/slack-agent"
 
 uninstall:
-	rm -f $(BINDIR)/slack-unfurl
+	rm -f $(BINDIR)/slack-agent
 
 clean:
 	rm -rf $(BUILDDIR)

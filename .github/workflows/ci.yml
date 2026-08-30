@@ -15,30 +15,38 @@ concurrency:
 
 jobs:
   native:
-    name: native (${{ matrix.cxx }})
+    name: native (clang)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # g++-14, not the runner's default g++: the library is a C++20 named
-        # module and gcc 13 segfaults compiling a four-line program that imports
-        # one and uses std::string at -O2. The Makefile refuses it by version
-        # rather than letting anyone hit that.
-        cxx: [clang++, g++-14]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install the compiler
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends g++-14
+      # clang only, and not by preference: gcc 13 segfaults compiling a module
+      # that uses std::string, and gcc 14 ICEs on this code with or without
+      # debug info. The Makefile refuses gcc by version with that explanation.
+      - name: Install the toolchain and libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev
 
       - name: Show the toolchain the build settled on
-        run: make CXX=${{ matrix.cxx }} print-config
+        run: make CXX=clang++ print-config
 
       # STRICT=1 is -Werror. It lives here rather than in the default build so
       # that a compiler newer than this commit inventing a new warning breaks CI
-      # rather than someone's first link preview.
+      # rather than someone's first plugin start.
       - name: Build and test with warnings as errors
-        run: make CXX=${{ matrix.cxx }} STRICT=1 all test
+        run: make CXX=clang++ STRICT=1 all test
+
+      - name: The agent answers without a keyring or a token
+        run: |
+          set -x
+          ./build/slack-agent | grep -q '"ok":false'
+          ./build/slack-agent credentials | grep -q '"ok":true'
+          printf '<html><head><meta property="og:title" content="ci"></head></html>' \
+            | ./build/slack-agent parse-html https://example.com/ | grep -q '"title":"ci"'
+          # A pasted loopback URL must never be fetched.
+          ./build/slack-agent unfurl http://127.0.0.1:1/x | grep -q '"unfurls":{}'
 
   sanitizers:
     name: sanitizers
@@ -48,8 +56,11 @@ jobs:
 
       # clang, not gcc: gcc 14 ICEs compiling a module unit with -fsanitize
       # (cp/module.cc:9455). The Makefile refuses that combination outright.
-      - name: Make sure clang's sanitizer runtime is present
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends clang libclang-rt-dev
+      - name: Install the toolchain and libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev
 
       - name: Tests under AddressSanitizer and UndefinedBehaviorSanitizer
         run: make CXX=clang++ STRICT=1 SANITIZE=1 test
@@ -64,8 +75,11 @@ jobs:
       # runtime: the parser's entire input is bytes chosen by whoever owns the
       # page behind a pasted link, and every bug found in it so far was found
       # here rather than by anyone writing a test case.
-      - name: Make sure clang's sanitizer runtime is present
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends clang libclang-rt-dev
+      - name: Install the toolchain and libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev
 
       - name: Fuzz for two minutes over the checked-in corpus
         run: make CXX=clang++ fuzz FUZZ_TIME=120
@@ -96,46 +110,37 @@ jobs:
       - name: Parse every QML file
         run: make QMLFORMAT=/usr/lib/qt6/bin/qmlformat qml
 
-  scripts:
-    name: shell, python, manifest
+  plugin:
+    name: manifest and entry points
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install shellcheck
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends shellcheck
-
-      - name: Shell syntax
-        run: bash -n slack.sh
-
-      # LC_ALL because shellcheck writes the offending line back out, and
-      # slack.sh contains non-ASCII replacement text.
-      - name: shellcheck
-        run: LC_ALL=C.UTF-8 shellcheck --severity=warning slack.sh
-
-      - name: Python syntax
-        run: python3 -m py_compile oauth-login.py
-
-      - name: Manifest is valid JSON, and its defaults match the settings pane
+      - name: Every setting the pane saves has a manifest default
         run: |
           python3 - <<'PY'
-          import json, re, sys
+          import json, os, re, sys
 
           manifest = json.load(open("manifest.json"))
           defaults = manifest["metadata"]["defaultSettings"]
 
-          # Every setting the settings pane saves must have a default in the
-          # manifest, or it reads back as undefined on a fresh install.
+          # A setting Settings.qml writes with no default in the manifest reads
+          # back as undefined on a fresh install.
           saved = set(re.findall(r"pluginApi\.pluginSettings\.(\w+)\s*=", open("Settings.qml").read()))
           missing = sorted(saved - set(defaults))
           if missing:
               sys.exit("Settings.qml saves keys with no manifest default: " + ", ".join(missing))
 
-          # Every entry point named in the manifest has to exist.
-          import os
           for role, path in manifest["entryPoints"].items():
               if not os.path.exists(path):
                   sys.exit(f"entryPoints.{role} points at a missing file: {path}")
+
+          # The scripts are gone; nothing may reach for them again.
+          for qml in ["Main.qml", "Settings.qml", "Panel.qml", "BarWidget.qml"]:
+              body = open(qml).read()
+              for dead in ["slack.sh", "oauth-login.py"]:
+                  if dead in body:
+                      sys.exit(f"{qml} still refers to {dead}, which no longer exists")
 
           print(f"{len(defaults)} defaults, {len(manifest['entryPoints'])} entry points, all present")
           PY

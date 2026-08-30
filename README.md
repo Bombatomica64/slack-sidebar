@@ -7,6 +7,24 @@ posts back to Slack. Shaped after the sidebar-chat layout in
 picker slides aside to reveal the transcript, and the composer stays pinned to
 the bottom.
 
+## Shell support
+
+Noctalia is the stable frontend; the DMS adapter is ready for experimental
+testing. Work on
+[#12](https://github.com/Bombatomica64/slack-sidebar/issues/12) is separating
+the Slack state/agent layer from the host shell so native integrations can be
+added without maintaining divergent copies of the client.
+
+| Shell | Status | Integration shape |
+| --- | --- | --- |
+| Noctalia | Supported | Native plugin entry points in the repository root |
+| DankMaterialShell (DMS) | Experimental | Native DMS bar widget/popout plugin in `Adapters/DMS` |
+| end-4 | Planned | Versioned `sidebarLeft` overlay; no stable plugin ABI upstream |
+| Caelestia | Planned | Versioned sidebar overlay until its third-party UI plugin API is wired |
+
+The shared backend contract is documented in `Core/README.md`; shell-specific
+code belongs under `Adapters/`.
+
 ## Install
 
 Requires **noctalia-shell 4.x** (developed against 4.7.7).
@@ -33,7 +51,7 @@ Then enable **Slack** in Noctalia's Settings → Plugins, and add its widget to 
 bar. The directory name must be `slack`, matching the `id` in `manifest.json`.
 
 The first time the plugin starts it runs `make install` for you, into
-`~/.cache/noctalia-slack/bin/`, and says so in the header while it does. If that
+`~/.cache/slack-sidebar/bin/`, and says so in the header while it does. If that
 fails the header explains what is missing; `make` in the plugin directory shows
 the real error. If you would rather not build anything, each release also ships
 a prebuilt `slack-agent` — drop it in that directory.
@@ -197,7 +215,7 @@ having left the workspace — is the case where no token works any more.
 
 Slack's `conversations.info` returns `unread_count`/`last_read` for DMs but not
 reliably for channels, so unread is computed locally: the agent keeps a read
-cursor per conversation in `${XDG_STATE_HOME:-~/.local/state}/noctalia-slack/cursors.json`
+cursor per conversation in `${XDG_STATE_HOME:-~/.local/state}/slack-sidebar/cursors.json`
 and counts anything newer that isn't yours. Every few minutes `sync-read`
 reconciles those cursors with Slack's own read state, so reading a channel on
 your phone still clears the badge here.
@@ -222,7 +240,7 @@ you have open is polled faster, on its own timer.
 - **Notifications** — for DMs and mentions, announcing the newest genuinely
   *unread* message (never your own reply sitting on top of it) with the sender's
   profile picture as the icon. Avatars are mirrored to
-  `~/.cache/noctalia-slack/avatars/` and passed as the `image-path` hint, since
+  `~/.cache/slack-sidebar/avatars/` and passed as the `image-path` hint, since
   notification daemons want a real file; the same local files are used in the
   transcript so an avatar cannot pop in late while scrolling.
 
@@ -239,7 +257,7 @@ blockquotes and `:emoji:`.
   than Slack shortcode (`joy`), and testing it against known-correct codes
   resolved only 77 of 164 — 12 of those to the wrong glyph.
 - **Custom workspace emoji** work. `slack-agent emoji` mirrors them from
-  `emoji.list` into `~/.cache/noctalia-slack/emoji-img/` once and renders them
+  `emoji.list` into `~/.cache/slack-sidebar/emoji-img/` once and renders them
   inline as local images, including one level of `alias:` indirection. Remote
   URLs are not used directly because Qt rich text loads them unreliably.
 - Shortcodes inside `` `code` `` and fenced blocks are left as text, not
@@ -251,8 +269,8 @@ Slack unfurls some links itself and sends the result in `attachments`; those are
 drawn as-is. Every other `<https://…>` in a message is crawled here:
 `slack-agent unfurl` fetches the page and reads its OpenGraph/Twitter-card
 metadata, mirrors the preview image and favicon into
-`~/.cache/noctalia-slack/unfurl-img/`, and caches the card in
-`~/.cache/noctalia-slack/unfurl/` for a week (six hours for a page that failed,
+`~/.cache/slack-sidebar/unfurl-img/`, and caches the card in
+`~/.cache/slack-sidebar/unfurl/` for a week (six hours for a page that failed,
 so a flaky host is retried but a dead link is not re-fetched every poll). Turn
 it off with **Link previews** in the plugin settings.
 
@@ -383,7 +401,7 @@ Three consequences worth knowing:
 If your compiler cannot build it the plugin cannot run at all — every Slack call
 goes through this binary — so the build refuses with a message naming what does
 work, and each release ships a prebuilt `slack-agent` to drop into
-`~/.cache/noctalia-slack/bin/`.
+`~/.cache/slack-sidebar/bin/`.
 
 One more rule worth knowing, since breaking it is silent until it is not:
 exported functions in these modules are deliberately **not `inline`**. An
@@ -469,7 +487,7 @@ of error that otherwise shows up as a silently blank sidebar.
 `manifest.json`, builds with static libstdc++, verifies the binary runs, and
 attaches it to the release with a `sha256`. Since the plugin cannot work without
 the binary, that artifact is the escape hatch for a machine whose compiler is
-too old — drop it into `~/.cache/noctalia-slack/bin/` and the plugin will use
+too old — drop it into `~/.cache/slack-sidebar/bin/` and the plugin will use
 it.
 
 ## Scrolling
@@ -524,7 +542,7 @@ exits 0; errors are `{"ok":false,"error":"..."}`, so nothing downstream has to
 read exit codes or stderr.
 
 ```sh
-agent=~/.cache/noctalia-slack/bin/slack-agent
+agent=~/.cache/slack-sidebar/bin/slack-agent
 
 $agent me
 $agent list                     # joined conversations + browsable public channels

@@ -24,7 +24,7 @@ ifeq ($(origin CXX),default)
 endif
 
 BUILDDIR ?= build
-PREFIX   ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/noctalia-slack
+PREFIX   ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/slack-sidebar
 BINDIR   ?= $(PREFIX)/bin
 
 # The source targets C++26. Older toolchains still build it, so probe downwards
@@ -197,7 +197,7 @@ COVERAGE_FLOOR ?= 25
 # is deliberately not used: it cannot resolve Noctalia's qs.Commons/qs.Widgets
 # modules, so every run drowns in unresolved-import warnings.
 QMLFORMAT := $(shell command -v qmlformat 2>/dev/null || echo /usr/lib/qt6/bin/qmlformat)
-QML_FILES := $(wildcard *.qml Components/*.qml)
+QML_FILES := $(shell find . -type f -name '*.qml' -print | sort)
 
 ifeq ($(PORTABLE),1)
   # A release binary has to run against whatever libstdc++ the user's distro
@@ -338,6 +338,7 @@ endif
 	@$(MAKE) --no-print-directory qml
 
 qml:
+	@sh ./scripts/check-shell-boundaries.sh
 	@if [ ! -x "$(QMLFORMAT)" ]; then \
 	  echo "skipped: qmlformat not found (install qt6-declarative-dev-tools)"; exit 0; \
 	fi; \

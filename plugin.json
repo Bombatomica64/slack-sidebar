@@ -1,0 +1,27 @@
+{
+  "id": "slackSidebar",
+  "name": "Slack Sidebar",
+  "description": "Slack conversations, unread badges, threads and replies in a DankBar popout",
+  "version": "0.9.0",
+  "author": "lollo",
+  "type": "widget",
+  "capabilities": [
+    "dankbar-widget",
+    "network",
+    "notifications"
+  ],
+  "component": "./Adapters/DMS/SlackWidget.qml",
+  "settings": "./Adapters/DMS/SlackSettings.qml",
+  "icon": "chat",
+  "requires_dms": ">=1.5.0",
+  "dependencies": [
+    "make",
+    "xdg-open"
+  ],
+  "permissions": [
+    "settings_read",
+    "settings_write",
+    "process",
+    "network"
+  ]
+}

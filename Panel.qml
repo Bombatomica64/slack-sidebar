@@ -153,6 +153,10 @@ Item {
                     text: {
                         if (!root.main)
                             return "";
+                        // Before lastError, because the first-run build is
+                        // progress and would otherwise read as a failure.
+                        if (root.main.agentBuilding)
+                            return "Building the Slack helper…";
                         if (root.main.lastError !== "")
                             return root.main.lastError;
                         if (root.main.signingIn)
@@ -172,6 +176,8 @@ Item {
                         return root.main.connected ? "All caught up" : "Not connected";
                     }
                     color: {
+                        if (root.main?.agentBuilding ?? false)
+                            return Color.mSecondary;
                         if ((root.main?.lastError ?? "") !== "")
                             return Color.mError;
                         if (root.main?.signingIn ?? false)
@@ -319,6 +325,7 @@ Item {
                 Slack.ConversationList {
                     anchors.fill: parent
                     conversations: root.main?.decorated ?? []
+                    loading: root.main?.conversationsPending ?? true
                     users: root.main?.userMap ?? ({})
                     activeId: root.main?.activeId ?? ""
                     botMode: root.main?.botMode ?? false

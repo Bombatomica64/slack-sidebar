@@ -369,6 +369,11 @@ Item {
                         // thread inside it), so name the pair.
                         sessionKey: (root.main?.activeId ?? "") + "/" + (root.main?.threadTs ?? "")
                         loading: root.inThread ? (root.main?.threadLoading ?? false) : (root.main?.activeLoading ?? false)
+                        // Paging back only applies to a conversation; a thread
+                        // arrives whole.
+                        hasMore: !root.inThread && (root.main?.activeHasMore ?? false)
+                        loadingOlder: root.main?.loadingOlder ?? false
+                        onLoadOlderRequested: root.main.loadOlder()
                         emptyText: {
                             if (root.inThread)
                                 return "No replies yet";

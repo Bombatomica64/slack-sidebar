@@ -41,6 +41,9 @@ Item {
     property string readCursor: ""
     property bool inThread: false
     property bool loading: false
+    // There is history before the oldest row, and whether we are fetching it.
+    property bool hasMore: false
+    property bool loadingOlder: false
     property string emptyText: "No messages yet"
 
     // Changes when the view is showing a different conversation or thread.
@@ -48,6 +51,7 @@ Item {
     // something else should start at the bottom, not wherever you were.
     property string sessionKey: ""
 
+    signal loadOlderRequested()
     signal threadRequested(string ts)
     signal reactionToggled(string ts, string name, bool mine)
     signal copyRequested(string text)
@@ -58,6 +62,11 @@ Item {
     property bool stickToLatest: true
 
     readonly property bool showJumpButton: !stickToLatest && !list.atEnd && rows.count > 0
+
+    function _maybeLoadOlder() {
+        if (root.hasMore && !root.loadingOlder && rows.count > 0)
+            root.loadOlderRequested();
+    }
 
     function jumpToLatest() {
         root.stickToLatest = true;
@@ -188,7 +197,12 @@ Item {
     function _captureAnchor() {
         if (root.stickToLatest || rows.count === 0)
             return null;
-        const index = list.indexAt(1, list.contentY + 1);
+        let index = -1;
+        for (const probe of [1, 48, 120]) {
+            index = list.indexAt(1, list.contentY + probe);
+            if (index >= 0)
+                break;
+        }
         if (index < 0 || index >= rows.count)
             return null;
         const item = list.itemAtIndex(index);
@@ -246,6 +260,43 @@ Item {
         reserveScrollbarSpace: true
 
         onScrolledByUser: root.stickToLatest = false
+
+        // Reaching the top asks for the previous page, the way Slack does.
+        // `scrollable` matters: without it a conversation too short to scroll
+        // is permanently "at the beginning" and would page itself to the start
+        // of time on its own.
+        onAtBeginningChanged: if (list.atBeginning && list.scrollable)
+            root._maybeLoadOlder()
+
+        // A flick can cross the top and settle before atBeginning changes.
+        onMovingChanged: if (!list.moving && list.atBeginning && list.scrollable)
+            root._maybeLoadOlder()
+
+        // The rows below shift down when a page is prepended; MessageList's
+        // anchor logic is what keeps the reader's place while that happens.
+        header: Component {
+            Item {
+                width: list.availableWidth
+                height: visible ? Math.round(30 * Style.uiScaleRatio) : 0
+                visible: root.hasMore || root.loadingOlder
+
+                NText {
+                    anchors.centerIn: parent
+                    text: root.loadingOlder ? "Loading earlier messages…" : "Earlier messages"
+                    color: Color.mOnSurfaceVariant
+                    pointSize: Style.fontSizeXXS
+                }
+
+                // A button as well as the automatic load: a conversation whose
+                // history is shorter than the viewport never reaches the top.
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: root.hasMore && !root.loadingOlder
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: root.loadOlderRequested()
+                }
+            }
+        }
         // Scrolling back down to the bottom means you have caught up, so start
         // following again rather than making you press the jump button.
         onAtEndChanged: if (list.atEnd)

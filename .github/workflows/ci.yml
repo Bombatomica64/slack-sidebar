@@ -51,77 +51,75 @@ jobs:
   gcc-modules-probe:
     name: gcc 15 (probe, non-blocking)
     runs-on: ubuntu-latest
-    # Never gates a merge. gcc cannot build this today - gcc 13 segfaults and
-    # gcc 14 hits an internal compiler error on modules against Qt - and the
-    # Makefile refuses it for that reason. This job exists to answer one
-    # question on every push: has gcc 15 fixed it? The answer lands in the run
-    # summary, so nobody has to reproduce it by hand to find out.
+    # Never gates a merge, and never goes red. gcc cannot build this today -
+    # gcc 13 segfaults and gcc 14 hits an internal compiler error on modules
+    # against Qt - and the Makefile refuses it for that reason. This job answers
+    # one question on every push: has gcc 15 fixed it? A "no" is a result, not a
+    # failure, so the verdict goes in the run summary and the job exits 0.
     continue-on-error: true
+    # The official gcc image, rather than apt on the runner. Ubuntu 24.04 has no
+    # gcc 15, and `apt-get install g++-15` does not fail on a missing package:
+    # apt falls back to treating the name as a regex, which matches clang-15 and
+    # flang-15 and reports success, so the probe cheerfully installs the wrong
+    # compiler and then finds no g++-15.
+    container:
+      image: gcc:15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install gcc 15 and the libraries
-        id: toolchain
+      - name: Build with gcc 15 and record the verdict
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            qt6-base-dev libsecret-1-dev libssl-dev
-          # gcc 15 is not in Ubuntu 24.04; the toolchain PPA carries it.
-          if ! sudo apt-get install -y --no-install-recommends g++-15; then
-            sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends g++-15 || true
-          fi
-          if command -v g++-15 >/dev/null; then
-            echo "available=yes" >> "$GITHUB_OUTPUT"
-            g++-15 --version | head -1
-          else
-            echo "available=no" >> "$GITHUB_OUTPUT"
+          verdict=setup-failed
+          detail=
+          version=unknown
+          if apt-get update -qq \
+             && apt-get install -y --no-install-recommends \
+                  make pkg-config qt6-base-dev libsecret-1-dev libssl-dev; then
+            version="$(g++ -dumpfullversion 2>/dev/null || echo unknown)"
+            # ALLOW_GCC=1 lifts the Makefile's own gate, so a failure here is
+            # gcc's and not ours. STRICT stays off: a compiler this much newer
+            # inventing a new warning is not what is being measured.
+            if make CXX=g++ ALLOW_GCC=1 all test >gcc15.log 2>&1; then
+              verdict=builds
+            else
+              verdict=fails
+              detail="$(grep -m3 -E 'internal compiler error|error:' gcc15.log || tail -20 gcc15.log)"
+            fi
           fi
 
-      - name: Report that gcc 15 could not be installed
-        if: steps.toolchain.outputs.available != 'yes'
-        run: |
           {
-            echo "### gcc 15 probe: not run"
-            echo
-            echo "No g++-15 package was installable on this runner, so the"
-            echo "question is still open. The build stays clang-only."
+            case "$verdict" in
+              builds)
+                echo "### gcc $version builds this :tada:"
+                echo
+                echo "The clang-only gate in the Makefile can go: set gcc's"
+                echo '`CXX_MIN` to 15 and restore a gcc entry in the `native` job.'
+                ;;
+              fails)
+                echo "### gcc $version still cannot build this"
+                echo
+                echo "The build stays clang-only. First failure:"
+                echo
+                echo '```'
+                echo "$detail"
+                echo '```'
+                ;;
+              *)
+                echo "### gcc 15 probe: not run"
+                echo
+                echo "The toolchain or the Qt/libsecret/OpenSSL headers could not"
+                echo "be installed in the gcc:15 container, so the question is"
+                echo "still open. The build stays clang-only."
+                ;;
+            esac
           } >> "$GITHUB_STEP_SUMMARY"
-          exit 1
 
-      # ALLOW_GCC=1 lifts the Makefile's gate. STRICT is deliberately off: a new
-      # compiler inventing a new warning is not the thing being measured.
-      - name: Build and test with gcc 15
-        id: build
-        if: steps.toolchain.outputs.available == 'yes'
-        run: make CXX=g++-15 ALLOW_GCC=1 all test 2>&1 | tee gcc15.log
-
-      - name: Summarise the answer
-        if: always() && steps.toolchain.outputs.available == 'yes'
-        run: |
-          if [ "${{ steps.build.outcome }}" = "success" ]; then
-            {
-              echo "### gcc 15 builds this :tada:"
-              echo
-              echo "The clang-only gate in the Makefile can be relaxed to"
-              echo '`CXX_MIN := 15` for gcc, and the gcc matrix entry can come'
-              echo "back in the \`native\` job."
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "### gcc 15 still cannot build this"
-              echo
-              echo "Build stays clang-only. First failure:"
-              echo
-              echo '```'
-              grep -m5 -E 'internal compiler error|error:' gcc15.log || tail -20 gcc15.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "verdict: $verdict (gcc $version)"
+          # A "no" is the answer, not a failure.
+          exit 0
 
       - name: Keep the log
-        if: always() && steps.toolchain.outputs.available == 'yes'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gcc15-build-log

@@ -169,6 +169,9 @@ Item {
     }
     property var pollState: ({})            // id -> {unread, mention, latest, cursor}
     property bool listLoading: false
+    // True through the whole startup window - before the agent has answered at
+    // all, as well as while the list itself is in flight.
+    readonly property bool conversationsPending: !agentReady || listLoading
     property bool polling: false
 
     property string activeId: ""
@@ -818,7 +821,6 @@ Item {
         if (root.agentBuilding)
             return;
         root.agentBuilding = true;
-        root.lastError = "Building the Slack helper…";
         buildProc.command = ["make", "-C", root.pluginDir(), "--no-print-directory", "PREFIX=" + root.cacheDir(), "BUILDDIR=" + root.cacheDir() + "/build", "install"];
         buildProc.running = true;
     }

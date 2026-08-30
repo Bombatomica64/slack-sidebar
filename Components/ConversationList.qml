@@ -17,6 +17,8 @@ Item {
     property var users: ({})
     property string activeId: ""
     property bool botMode: false
+    // Nothing to show yet is not the same as having nothing.
+    property bool loading: false
     property alias filter: search.text
 
     signal conversationPicked(string id)
@@ -243,10 +245,24 @@ Item {
                 spacing: Style.marginXS
                 visible: root.visibleConversations.length === 0
 
+                NIcon {
+                    Layout.alignment: Qt.AlignHCenter
+                    visible: root.loading
+                    icon: "loader-2"
+                    color: Color.mOnSurfaceVariant
+                    pointSize: Style.fontSizeXL
+                }
+
                 NText {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
-                    text: root.conversations.length === 0 ? (root.botMode ? "No conversations this app can see" : "No conversations yet") : "Nothing matches that search"
+                    text: {
+                        if (root.loading)
+                            return "Loading conversations…";
+                        if (root.conversations.length === 0)
+                            return root.botMode ? "No conversations this app can see" : "No conversations yet";
+                        return "Nothing matches that search";
+                    }
                     color: Color.mOnSurfaceVariant
                     pointSize: Style.fontSizeXS
                     wrapMode: Text.WordWrap

@@ -115,6 +115,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "verdict: $verdict (gcc $version)"
+          # Also to the job log, not just the summary: reading it should not
+          # require downloading an artifact or opening another tab.
+          [ -n "$detail" ] && printf '%s\n' "$detail"
           # A "no" is the answer, not a failure.
           exit 0
 

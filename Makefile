@@ -47,11 +47,15 @@ CXX_MAJOR    := $(firstword $(subst ., ,$(shell $(CXX) -dumpfullversion -dumpver
 #           uses std::string at -O2. It is still the default on Ubuntu 24.04 LTS.
 #   gcc 14  ICEs on this code under every flag combination tried - in
 #           gen_enumeration_type_die (dwarf2out.cc) with debug info, and in
-#           nothrow_spec_p (cp/except.cc) without it. Modules plus Qt headers of
-#           this size is more than its implementation handles.
+#           nothrow_spec_p (cp/except.cc) without it.
+#   gcc 15  also fails, measured: 15.3.0 against Qt 6.8.2 in CI's gcc:15
+#           container. Modules plus Qt headers of this size is more than gcc's
+#           implementation handles, and it is not a matter of waiting one
+#           release.
 #
-# gcc 15 may well be fine; nothing here could test it. ALLOW_GCC=1 lifts the
-# gate for anyone who wants to find out, rather than making that a patch.
+# CI re-asks on every push (the gcc-modules-probe job), so the day this stops
+# being true it says so. ALLOW_GCC=1 lifts the gate for anyone who wants to try
+# a newer gcc themselves, rather than making that a patch.
 ifeq ($(CXX_IS_CLANG),1)
   CXX_MIN := 17
 else

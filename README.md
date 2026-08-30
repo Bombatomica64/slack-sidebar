@@ -265,13 +265,14 @@ That costs a compiler floor, and the floor turned out to be **clang only**:
 | clang 17+ | works |
 | gcc 13 | *segfaults* compiling a four-line program that imports a module and uses `std::string` at `-O2`. Still the default on Ubuntu 24.04 LTS. |
 | gcc 14 | internal compiler error on this code under every flag combination tried — `gen_enumeration_type_die` (dwarf2out.cc) with debug info, `nothrow_spec_p` (cp/except.cc) without it |
+| gcc 15 | also fails — 15.3.0 against Qt 6.8.2, measured in CI |
 
-Modules plus Qt headers of this size is simply more than gcc's implementation
-currently handles. gcc 15 might be fine — no machine here had it — so rather
-than leave that as folklore, CI asks on every push: the non-blocking
-`gcc-modules-probe` job installs gcc 15, builds with `ALLOW_GCC=1` (which lifts
-the Makefile's gate), and writes the answer into the run summary. The gcc module
-build rules are kept for the day it says yes.
+Modules plus Qt headers of this size is more than gcc's implementation handles,
+and gcc 15 shows it is not a matter of waiting one release. CI keeps asking
+anyway: the non-blocking `gcc-modules-probe` job builds in the official `gcc:15`
+container with `ALLOW_GCC=1` (which lifts the Makefile's gate) and writes the
+verdict into the run summary, so the day this stops being true it says so
+rather than nobody noticing. The gcc module build rules are kept for that day.
 
 Three consequences worth knowing:
 

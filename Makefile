@@ -158,7 +158,7 @@ endif
 # Qt and the C libraries the agent needs. Discovered with pkg-config rather than
 # hardcoded: the Qt include layout differs between distros, and a missing
 # development package should say which one by name.
-DEP_PACKAGES := Qt6Core Qt6Network libsecret-1 openssl
+DEP_PACKAGES := Qt6Core Qt6Network libsecret-1 openssl sqlcipher
 DEP_MISSING  := $(strip $(foreach p,$(DEP_PACKAGES),$(if $(shell pkg-config --exists $(p) && echo 1),,$(p))))
 ifneq ($(DEP_MISSING),)
   ifneq ($(MAKECMDGOALS),help)
@@ -226,7 +226,7 @@ endif
 # The import graph is written out below rather than scanned for: eight modules
 # in a DAG that changes about once a year does not justify clang-scan-deps and
 # a two-phase build.
-MODULE_NAMES := html util keyring net api store oauth commands
+MODULE_NAMES := html util keyring net api store archive oauth commands
 MODULE_SRCS  := $(MODULE_NAMES:%=native/%.cppm)
 MODULE_OBJS  := $(MODULE_NAMES:%=$(BUILDDIR)/%.o)
 
@@ -286,8 +286,10 @@ $(BUILDDIR)/slack.net.$(BMI_EXT):      $(BUILDDIR)/slack.util.$(BMI_EXT)
 $(BUILDDIR)/slack.api.$(BMI_EXT):      $(BUILDDIR)/slack.util.$(BMI_EXT) $(BUILDDIR)/slack.keyring.$(BMI_EXT) $(BUILDDIR)/slack.net.$(BMI_EXT)
 $(BUILDDIR)/slack.store.$(BMI_EXT):    $(BUILDDIR)/slack.util.$(BMI_EXT) $(BUILDDIR)/slack.api.$(BMI_EXT)
 $(BUILDDIR)/slack.oauth.$(BMI_EXT):    $(BUILDDIR)/slack.util.$(BMI_EXT) $(BUILDDIR)/slack.keyring.$(BMI_EXT) $(BUILDDIR)/slack.net.$(BMI_EXT)
+$(BUILDDIR)/slack.archive.$(BMI_EXT):  $(BUILDDIR)/slack.util.$(BMI_EXT) $(BUILDDIR)/slack.keyring.$(BMI_EXT)
 $(BUILDDIR)/slack.commands.$(BMI_EXT): $(BUILDDIR)/slack.util.$(BMI_EXT) $(BUILDDIR)/slack.keyring.$(BMI_EXT) $(BUILDDIR)/slack.net.$(BMI_EXT) \
                                        $(BUILDDIR)/slack.api.$(BMI_EXT) $(BUILDDIR)/slack.store.$(BMI_EXT) \
+                                       $(BUILDDIR)/slack.archive.$(BMI_EXT) \
                                        $(BUILDDIR)/slack.oauth.$(BMI_EXT) $(BUILDDIR)/slack.html.$(BMI_EXT)
 
 $(BUILDDIR)/agent_main.o: $(AGENT_SRC) $(MODULE_BMIS) | $(BUILDDIR)

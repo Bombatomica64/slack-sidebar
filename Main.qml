@@ -36,6 +36,8 @@ Item {
     readonly property bool markReadOnOpen: setting("markReadOnOpen", true)
     // Crawl the links Slack did not unfurl for us and show a preview card.
     readonly property bool linkPreviews: setting("linkPreviews", true)
+    // Keep every message seen in an encrypted database on this machine.
+    readonly property bool archiveMessages: setting("archiveMessages", true)
     // With a bot token, auth.test reports the app's id rather than yours. Naming
     // your human account here keeps "mine", unread and @mentions correct.
     readonly property string identityUserId: setting("identityUserId", "")
@@ -433,6 +435,8 @@ Item {
         // only to correct a bot token's, so don't let a stale value leak in.
         if (root.identityUserId !== "" && root.botMode)
             base.push("--me", root.identityUserId);
+        if (!root.archiveMessages)
+            base.push("--no-archive");
         proc.command = base.concat(args);
         proc.running = true;
         return true;
@@ -520,6 +524,7 @@ Item {
         root._activeSig = "";
         root._threadSig = "";
         root.sendError = "";
+        loadFromArchive();
         loadHistory();
     }
 
@@ -530,6 +535,18 @@ Item {
         root.threadMessages = [];
         root._activeSig = "";
         root._threadSig = "";
+    }
+
+    // Read from the local archive first. It answers in a millisecond or two, so
+    // the transcript is on screen before the network call is out the door - and
+    // it is the whole transcript when there is no network at all.
+    property string _archiveFor: ""
+
+    function loadFromArchive() {
+        if (root.activeId === "" || !root.archiveMessages)
+            return;
+        root._archiveFor = root.activeId;
+        _run(archiveProc, ["archive", root.activeId, String(root.historyLimit)]);
     }
 
     function loadHistory() {
@@ -991,6 +1008,32 @@ Item {
         }
         stderr: StdioCollector {}
         onExited: root.activeLoading = false
+    }
+
+    Process {
+        id: archiveProc
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const res = root._parse(this.text, "archive");
+                if (!res || res.ok !== true || res.fromArchive !== true)
+                    return;
+                // The network may have answered first, or the reader may have
+                // moved on. Either way the archive is the older truth and must
+                // not overwrite anything.
+                if (root._archiveFor !== root.activeId || root.activeMessages.length > 0)
+                    return;
+                const messages = res.messages || [];
+                if (messages.length === 0)
+                    return;
+                root._mergeUsers(res.users);
+                root.activeMessages = root._render(messages);
+                root.activeReadCursor = res.readCursor || root.activeReadCursor;
+                // Force the next network result to be applied even if it shapes
+                // up identically to what the archive just gave us.
+                root._activeSig = "";
+            }
+        }
+        stderr: StdioCollector {}
     }
 
     Process {

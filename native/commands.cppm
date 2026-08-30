@@ -36,13 +36,18 @@ import slack.keyring;
 import slack.net;
 import slack.api;
 import slack.store;
+import slack.archive;
 import slack.html;
 
 namespace u = slack::util;
 namespace net = slack::net;
 namespace html = slack::html;
+namespace archive = slack::archive;
 
 export namespace slack::commands {
+
+void setArchiveEnabled(bool enabled);
+QString readCursorFor(api::Session& session, const QString& channel);
 // Declared here because the file-local helpers below call it, and defined with
 // the rest of the exported surface further down.
 bool crawlable(const QString& url);
@@ -329,6 +334,21 @@ inline constexpr qint64 kUnfurlTtl = 604800;
 inline constexpr qint64 kUnfurlFailTtl = 21600;
 inline constexpr qint64 kAssetMaxBytes = 4000000;
 
+// Recording every message you read is not something to do without a way to turn
+// it off. `--no-archive` clears this for the run.
+bool g_archiveEnabled = true;
+
+// Everything fetched goes into the archive, including from the background poll -
+// which means a conversation nobody opens still accumulates, and is why the
+// archive is not merely a cache of what has been read.
+void archiveMessages(api::Session& session, const QString& channel, const QJsonArray& shaped) {
+    if (!g_archiveEnabled || shaped.isEmpty() || channel.isEmpty())
+        return;
+    archive::Db db(api::kindName(session.tokenKind()));
+    if (db.ok())
+        (void)archive::ingest(db, channel, shaped);
+}
+
 // ----------------------------------------------------------------- identity
 
 QJsonObject me(api::Session& session) {
@@ -401,8 +421,10 @@ QJsonObject history(api::Session& session, const QString& channel, int limit, co
     }
     const QJsonArray raw = u::array(response, "messages");
     const QJsonObject users = store::resolveUsers(session, collectUserIds(raw));
+    const QJsonArray shaped = shapeMessages(raw, users, session.mineIds());
+    archiveMessages(session, channel, shaped);
     return {{"ok", true},
-            {"messages", shapeMessages(raw, users, session.mineIds())},
+            {"messages", shaped},
             {"users", users},
             {"readCursor", store::cursorFor(store::cursors(session), channel)},
             {"hasMore", u::boolean(response, "has_more")}};
@@ -420,6 +442,7 @@ QJsonObject replies(api::Session& session, const QString& channel, const QString
     const QJsonArray raw = u::array(response, "messages");
     const QJsonObject users = store::resolveUsers(session, collectUserIds(raw));
     QJsonArray shaped = shapeMessages(raw, users, session.mineIds());
+    archiveMessages(session, channel, shaped);
 
     // The transcript wants newest first, the same as conversations.history.
     std::vector<QJsonObject> rows;
@@ -560,6 +583,11 @@ QJsonObject poll(api::Session& session, const QString& idsCsv) {
                                        {"author", authorOf(first, users)},
                                        {"text", u::flatten(u::str(first, "text"))}};
         }
+
+        // The poll already holds the newest twenty messages of every watched
+        // conversation. Shaping and archiving them is what fills the archive
+        // for conversations nobody opens.
+        archiveMessages(session, id, shapeMessages(u::array(response, "messages"), users, mine));
 
         conversations[id] = QJsonObject{{"ok", u::boolean(response, "ok")},
                                         {"error", error},
@@ -832,16 +860,83 @@ QJsonObject unfurl(const QStringList& urlsIn) {
 
 // ------------------------------------------------------------------- misc
 
+// The same shape `history` returns, so the UI cannot tell the difference -
+// which is the point: this is what makes opening a conversation instant, and
+// what makes it work with no network at all.
+QJsonObject archiveHistory(const QString& identity, const QString& channel, int limit,
+                           const QString& before, const QJsonObject& users, const QString& cursor) {
+    archive::Db db(identity, false);
+    if (!db.ok())
+        return {{"ok", true}, {"messages", QJsonArray{}}, {"users", QJsonObject{}}, {"fromArchive", true}};
+    return {{"ok", true},
+            {"messages", archive::readHistory(db, channel, limit, before)},
+            {"users", users},
+            {"readCursor", cursor},
+            {"fromArchive", true}};
+}
+
+// What a message used to say before somebody edited it.
+QJsonObject archiveRevisions(const QString& identity, const QString& channel, const QString& ts) {
+    archive::Db db(identity, false);
+    if (!db.ok())
+        return {{"ok", true}, {"revisions", QJsonArray{}}};
+    return {{"ok", true}, {"revisions", archive::readRevisions(db, channel, ts)}};
+}
+
+QJsonObject archiveStats(const QString& identity) {
+    archive::Db db(identity, false);
+    QJsonObject out = archive::stats(db);
+    const QString path = archive::databasePath(identity);
+    out[u::qs("path")] = path;
+    const QFileInfo info(path);
+    out[u::qs("bytes")] = info.exists() ? info.size() : 0;
+    return out;
+}
+
+// The archive is encrypted with a key that exists in exactly one place. Losing
+// the keyring entry loses the archive, so there has to be a way to write the
+// key down somewhere of your own choosing.
+QJsonObject archiveKey() {
+    const QString key = archive::keyHex(false);
+    if (key.isEmpty())
+        return {{"ok", false}, {"error", u::qs("no archive key stored yet - it is created the first time a message is archived")}};
+    return {{"ok", true},
+            {"key", key},
+            {"note", u::qs("32 bytes, hex. This is the only copy besides the keyring; anyone holding "
+                           "it can read the archive.")}};
+}
+
+// Restore a key written down from `archive-key`, so an archive copied off a
+// dead machine can be read on a new one.
+QJsonObject archiveAdoptKey(const QString& hex) {
+    if (!archive::adoptKey(hex)) {
+        return {{"ok", false},
+                {"error", u::qs("expected 64 hex characters, as printed by `archive-key`")}};
+    }
+    return {{"ok", true}};
+}
+
+void setArchiveEnabled(bool enabled) {
+    g_archiveEnabled = enabled;
+}
+
+QString readCursorFor(api::Session& session, const QString& channel) {
+    return store::cursorFor(store::cursors(session), channel);
+}
+
 QJsonObject users(api::Session& session) {
     return {{"ok", true}, {"users", store::usersCache(session)}};
 }
 
+// Caches only. The archive is deliberately not touched: it is the only copy of
+// anything Slack has since dropped, and `reset` is something people run when
+// the sidebar looks wrong.
 QJsonObject reset(api::Session& session) {
     QFile::remove(session.conversationsCache());
     QFile::remove(session.usersCache());
     QFile::remove(session.meCache());
     QDir(unfurlDir()).removeRecursively();
-    return {{"ok", true}};
+    return {{"ok", true}, {"archiveKept", archive::databasePath(api::kindName(session.tokenKind()))}};
 }
 
 }  // namespace slack::commands

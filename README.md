@@ -16,9 +16,9 @@ for itself on first run, so the machine needs a toolchain:
 
 | | |
 | --- | --- |
-| Debian / Ubuntu | `apt install make clang qt6-base-dev libsecret-1-dev libssl-dev` |
-| Arch | `pacman -S make clang qt6-base libsecret openssl` |
-| Fedora | `dnf install make clang qt6-qtbase-devel libsecret-devel openssl-devel` |
+| Debian / Ubuntu | `apt install make clang qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev` |
+| Arch | `pacman -S make clang qt6-base libsecret openssl sqlcipher` |
+| Fedora | `dnf install make clang qt6-qtbase-devel libsecret-devel openssl-devel sqlcipher-devel` |
 
 **clang 17 or newer.** gcc cannot build this — see
 [Modules](#modules-and-the-compiler-floor-they-cost) for the details.
@@ -126,6 +126,72 @@ Set **Your Slack user ID** in the plugin settings when using a bot token.
 `auth.test` reports the *app's* user id, so without it your own messages are
 attributed to a stranger, they inflate the unread count, and `@you` never
 matches. With it set, both identities count as "you".
+
+## The local archive
+
+Every message the plugin sees is kept in an encrypted SQLite database on this
+machine — from opening a conversation, from a thread, and from the background
+poll, so a conversation nobody opens still accumulates.
+
+It exists because Slack forgets. A free workspace hides history past ninety
+days, a deleted message simply stops appearing, and leaving a company ends your
+access to everything you wrote there. Past that window this file is the only
+copy, which is why it is **append-only**: nothing here deletes a message, and
+`slack-agent reset` clears the caches but deliberately leaves the archive alone.
+
+It is also what makes opening a conversation instant — the transcript is read
+from disk before the network call is out the door — and what makes the sidebar
+readable with no network at all.
+
+| | |
+| --- | --- |
+| Where | `~/.local/state/noctalia-slack/archive-{user,bot}.db`, mode 0600, one per identity |
+| Encryption | SQLCipher, transparent at the page level — no message text, author or even the SQLite header is readable on disk |
+| Key | 32 random bytes in the keyring as `archive-key`, created on first use |
+| Off switch | **Keep a local archive** in the plugin settings, or `--no-archive` |
+
+### Messages change, so revisions are kept
+
+People edit messages on Slack. An archive that overwrote the previous text would
+quietly lose what was actually said at the time, so a message whose *text*
+changes keeps its old version in a `revisions` table — `slack-agent
+archive-revisions <channel> <ts>` reads them back. Reactions and reply counts
+churn on every poll and are not edits; those update in place without making a
+revision.
+
+### The key, and getting it back
+
+The key exists in exactly one place. Lose the keyring entry and the archive is
+unreadable, so there is a way to write it down:
+
+```sh
+slack-agent archive-key            # print it
+slack-agent archive-key <hex>      # put it back, on a new machine
+```
+
+Anyone holding that key can read the archive, so treat it as you would the
+token.
+
+Both of those work with **no Slack token at all**, as does reading the archive
+itself:
+
+```sh
+slack-agent --identity user archive C0123 50
+slack-agent --identity user archive-stats
+```
+
+That is deliberate. Needing a working Slack token to reach your own decryption
+key would be exactly backwards, and the case the archive most exists for —
+having left the workspace — is the case where no token works any more.
+
+### Worth knowing
+
+- It grows without bound. That is the point of an archive rather than a cache,
+  but it means the file wants backing up. It lives in `state/`, not `cache/`, so
+  a backup tool that skips caches still catches it.
+- A message deleted on Slack stays here. Detecting an upstream deletion is not
+  reliably possible, and keeping it is the behaviour an archive should have
+  anyway.
 
 ## How unread is computed
 
@@ -438,6 +504,7 @@ The transcript is built to hold a steady frame at 120 Hz.
 | `native/agent_main.cpp` | `slack-agent`: subcommand dispatch |
 | `native/api.cppm` | Slack Web API, token selection and rotation |
 | `native/store.cppm` | conversation, user and read-cursor caches |
+| `native/archive.cppm` | the encrypted message archive |
 | `native/commands.cppm` | one function per subcommand |
 | `native/oauth.cppm` | OAuth2 sign-in: loopback TLS listener, PKCE, token storage |
 | `native/net.cppm` | HTTP on Qt Network, several requests in flight at once |
@@ -472,6 +539,10 @@ $agent --token bot me           # force an identity
 $agent tokens                   # which identities are available
 $agent emoji                    # sync custom workspace emoji
 $agent avatars                  # mirror profile pictures locally
+$agent archive C0123 50          # read the local archive instead of Slack
+$agent archive-revisions C0123 1787123637.474259
+$agent archive-stats             # how much has been kept, and where
+$agent archive-key               # print the archive key, or pass one to restore
 $agent unfurl https://example.com/a https://example.com/b
 $agent credentials              # is the app able to sign in / renew?
 $agent signin https://localhost:3000

@@ -33,9 +33,11 @@ namespace {
 
 QJsonObject usage() {
     return {{"ok", false},
-            {"error", u::qs("usage: slack-agent [--token user|bot|auto] [--me <userId>] "
+            {"error", u::qs("usage: slack-agent [--token user|bot|auto] [--me <userId>] [--no-archive] "
+                            "[--identity user|bot] "
                             "{me|list|poll|history [channel] [limit] [before-ts]|replies|send|read|react|join|emoji|avatars|"
                             "unfurl|sync-read|users|tokens|credentials|set-credentials|signin|"
+                            "archive|archive-revisions|archive-stats|archive-key [hex-to-restore]|"
                             "parse-html|reset}")}};
 }
 
@@ -67,12 +69,20 @@ int main(int argc, char** argv) {
     // mentions stay right.
     QString tokenPreference = u::qs("auto");
     QString meOverride;
+    // Names which archive to read without needing a session. The archive
+    // outlives the token that filled it - leaving a workspace ends your Slack
+    // access, and that is precisely when the local copy matters most.
+    QString identity;
     while (!args.isEmpty() && args.first().startsWith(u::qs("--"))) {
         const QString flag = args.takeFirst();
         if (flag == u::qs("--token") && !args.isEmpty())
             tokenPreference = args.takeFirst();
         else if (flag == u::qs("--me") && !args.isEmpty())
             meOverride = args.takeFirst();
+        else if (flag == u::qs("--no-archive"))
+            slack::commands::setArchiveEnabled(false);
+        else if (flag == u::qs("--identity") && !args.isEmpty())
+            identity = args.takeFirst();
         // An unknown flag is dropped rather than fatal: the QML side and this
         // binary are versioned together but not always updated together.
     }
@@ -91,6 +101,31 @@ int main(int argc, char** argv) {
         const int timeout = u::envOr("SLACK_OAUTH_TIMEOUT", u::qs("180")).toInt();
         u::emitJson(slack::oauth::signIn(redirect, timeout > 0 ? timeout : 180));
         return 0;
+    }
+    // The archive key must be reachable when nothing else is. Losing the keyring
+    // is the scenario it exists for, and needing a working Slack token to read
+    // your own decryption key would be exactly backwards.
+    if (verb == u::qs("archive-key")) {
+        u::emitJson(args.isEmpty() ? slack::commands::archiveKey()
+                                   : slack::commands::archiveAdoptKey(argAt(args, 0)));
+        return 0;
+    }
+    // Likewise reading the archive, when an identity is named outright.
+    if (!identity.isEmpty()) {
+        if (verb == u::qs("archive")) {
+            u::emitJson(slack::commands::archiveHistory(identity, argAt(args, 0),
+                                                        argAt(args, 1, u::qs("50")).toInt(),
+                                                        argAt(args, 2), {}, {}));
+            return 0;
+        }
+        if (verb == u::qs("archive-revisions")) {
+            u::emitJson(slack::commands::archiveRevisions(identity, argAt(args, 0), argAt(args, 1)));
+            return 0;
+        }
+        if (verb == u::qs("archive-stats")) {
+            u::emitJson(slack::commands::archiveStats(identity));
+            return 0;
+        }
     }
     if (verb == u::qs("credentials")) {
         u::emitJson(slack::commands::credentials());
@@ -152,6 +187,17 @@ int main(int argc, char** argv) {
         result = slack::commands::users(session);
     else if (verb == u::qs("tokens"))
         result = slack::commands::tokens(session);
+    else if (verb == u::qs("archive"))
+        result = slack::commands::archiveHistory(
+            slack::api::kindName(session.tokenKind()), argAt(args, 0),
+            argAt(args, 1, u::qs("50")).toInt(), argAt(args, 2),
+            slack::commands::users(session).value(u::qs("users")).toObject(),
+            slack::commands::readCursorFor(session, argAt(args, 0)));
+    else if (verb == u::qs("archive-revisions"))
+        result = slack::commands::archiveRevisions(slack::api::kindName(session.tokenKind()),
+                                                   argAt(args, 0), argAt(args, 1));
+    else if (verb == u::qs("archive-stats"))
+        result = slack::commands::archiveStats(slack::api::kindName(session.tokenKind()));
     else if (verb == u::qs("reset"))
         result = slack::commands::reset(session);
     else

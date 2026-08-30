@@ -1,7 +1,7 @@
 {
   "id": "slack",
   "name": "Slack",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "minNoctaliaVersion": "4.0.0",
   "author": "lollo",
   "license": "MIT",
@@ -35,6 +35,7 @@
       "notifyMentions": true,
       "markReadOnOpen": true,
       "linkPreviews": true,
+      "archiveMessages": true,
       "pinned": [],
       "identityUserId": "",
       "tokenPreference": "auto",

@@ -173,7 +173,9 @@ Item {
     property var activeMessages: []
     property string activeReadCursor: ""
     property bool activeLoading: false
+    // Slack says there is more history before the oldest message we hold.
     property bool activeHasMore: false
+    property bool loadingOlder: false
 
     property string threadTs: ""
     property var threadMessages: []
@@ -506,6 +508,8 @@ Item {
         root.threadMessages = [];
         root.activeId = id;
         root.activeMessages = [];
+        root.activeHasMore = false;
+        root.loadingOlder = false;
         root._activeSig = "";
         root._threadSig = "";
         root.sendError = "";
@@ -527,6 +531,34 @@ Item {
         root.activeLoading = true;
         if (!_run(historyProc, ["history", root.activeId, String(root.historyLimit)]))
             root.activeLoading = false;
+    }
+
+    // Page backwards from the oldest message on screen. The open conversation is
+    // re-polled every few seconds and that poll only ever returns the newest
+    // page, so anything loaded here has to survive it - see _mergeHistory.
+    function loadOlder() {
+        if (root.activeId === "" || !root.activeHasMore || root.loadingOlder)
+            return;
+        const messages = root.activeMessages;
+        if (messages.length === 0)
+            return;
+        root.loadingOlder = true;
+        const oldest = messages[messages.length - 1].ts;
+        if (!_run(olderProc, ["history", root.activeId, String(root.historyLimit), oldest]))
+            root.loadingOlder = false;
+    }
+
+    // Both arrays are newest-first. The fresh page wins wherever the two
+    // overlap, because that is where an edit or a new reaction shows up;
+    // everything older than it is kept, which is what stops a poll from
+    // throwing away the pages the reader has already scrolled back through.
+    function _mergeHistory(fresh) {
+        const existing = root.activeMessages || [];
+        if (existing.length === 0 || fresh.length === 0)
+            return fresh;
+        const oldestFresh = parseFloat(fresh[fresh.length - 1].ts);
+        const older = existing.filter(m => parseFloat(m.ts) < oldestFresh);
+        return older.length === 0 ? fresh : fresh.concat(older);
     }
 
     function markActiveRead() {
@@ -927,9 +959,9 @@ Item {
                 const res = root._parse(this.text, "history");
                 if (!res || res.ok !== true)
                     return;
-                const messages = res.messages || [];
                 // Users first: mentions inside the rendered text resolve against them.
                 root._mergeUsers(res.users);
+                const messages = root._mergeHistory(res.messages || []);
                 if (root._changed("_activeSig", messages))
                     root.activeMessages = root._render(messages);
                 root.activeReadCursor = res.readCursor || "";
@@ -940,6 +972,28 @@ Item {
         }
         stderr: StdioCollector {}
         onExited: root.activeLoading = false
+    }
+
+    Process {
+        id: olderProc
+        stdout: StdioCollector {
+            onStreamFinished: {
+                const res = root._parse(this.text, "older messages");
+                if (!res || res.ok !== true)
+                    return;
+                const older = res.messages || [];
+                root._mergeUsers(res.users);
+                if (older.length > 0) {
+                    // Appended, not prepended: the array runs newest-first.
+                    root.activeMessages = root.activeMessages.concat(root._render(older));
+                    root._activeSig = "";
+                }
+                // Slack reports whether anything remains before *this* page.
+                root.activeHasMore = res.hasMore === true;
+            }
+        }
+        stderr: StdioCollector {}
+        onExited: root.loadingOlder = false
     }
 
     Process {

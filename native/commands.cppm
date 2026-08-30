@@ -379,12 +379,22 @@ QJsonObject join(api::Session& session, const QString& channel) {
 
 // ---------------------------------------------------------------- messages
 
-QJsonObject history(api::Session& session, const QString& channel, int limit) {
-    const QJsonObject response =
-        session.call(u::qs("GET"), u::qs("conversations.history"),
-                     {{u::qs("channel"), channel},
-                      {u::qs("limit"), QString::number(limit)},
-                      {u::qs("inclusive"), u::qs("true")}});
+// `before` pages backwards: Slack returns the messages older than that
+// timestamp. Paging by timestamp rather than by the cursor in
+// response_metadata is deliberate - the open conversation is re-polled every
+// few seconds, and a stored cursor would be invalidated by that, where the
+// oldest message we hold is always a valid place to continue from.
+QJsonObject history(api::Session& session, const QString& channel, int limit, const QString& before) {
+    QList<std::pair<QString, QString>> params{{u::qs("channel"), channel},
+                                              {u::qs("limit"), QString::number(limit)}};
+    if (before.isEmpty()) {
+        params.append({u::qs("inclusive"), u::qs("true")});
+    } else {
+        params.append({u::qs("latest"), before});
+        // Exclusive, or every page would repeat the message it started from.
+        params.append({u::qs("inclusive"), u::qs("false")});
+    }
+    const QJsonObject response = session.call(u::qs("GET"), u::qs("conversations.history"), params);
     if (!u::boolean(response, "ok")) {
         const QString error = u::str(response, "error", u::qs("conversations.history failed"));
         return {{"ok", false}, {"error", error}, {"needsSignIn", api::isAuthError(error)}};

@@ -361,9 +361,13 @@ Item {
                         users: root.main?.userMap ?? ({})
                         customEmoji: root.main?.customEmoji ?? ({})
                         avatarMap: root.main?.avatarMap ?? ({})
+                        unfurls: root.main?.unfurls ?? ({})
                         meId: root.main?.meId ?? ""
                         readCursor: root.inThread ? "" : (root.main?.activeReadCursor ?? "")
                         inThread: root.inThread
+                        // Scroll position belongs to one conversation (or one
+                        // thread inside it), so name the pair.
+                        sessionKey: (root.main?.activeId ?? "") + "/" + (root.main?.threadTs ?? "")
                         loading: root.inThread ? (root.main?.threadLoading ?? false) : (root.main?.activeLoading ?? false)
                         emptyText: {
                             if (root.inThread)

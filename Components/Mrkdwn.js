@@ -215,6 +215,40 @@ function format(text, users, meId, colors, custom) {
     return result;
 }
 
+/**
+ * The http(s) links in a message, in the order they appear, deduplicated.
+ *
+ * Only Slack's own <...> entity form is considered, because that is the only
+ * form format() turns into a clickable link: crawling a bare URL that the
+ * transcript renders as plain text would put a preview card under something
+ * that does not look like a link at all.
+ */
+function extractLinks(text) {
+    var out = [];
+    if (!text)
+        return out;
+    var seen = {};
+    var re = /<([^<>\n]*)>/g;
+    var m;
+    while ((m = re.exec(String(text))) !== null) {
+        var inner = m[1];
+        var bar = inner.indexOf("|");
+        var head = bar >= 0 ? inner.slice(0, bar) : inner;
+        // Slack escapes &, < and > inside the entity too.
+        head = slackUnescape(head).trim();
+        if (!/^https?:\/\//i.test(head))
+            continue;
+        // A trailing bracket or full stop is punctuation from the prose around
+        // the link far more often than it is part of the URL.
+        head = head.replace(/[.,;:!?)\]]+$/, "");
+        if (head.length > 2000 || seen[head])
+            continue;
+        seen[head] = true;
+        out.push(head);
+    }
+    return out;
+}
+
 /** Plain-text flattening for sidebar previews and notifications. */
 function preview(text, users) {
     if (!text)

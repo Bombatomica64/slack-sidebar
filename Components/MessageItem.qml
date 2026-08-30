@@ -9,23 +9,32 @@ import "Mrkdwn.js" as Mrkdwn
 /**
  * One message in the transcript. Consecutive messages from the same author
  * within a few minutes are grouped: only the first keeps the avatar and header,
- * the rest are indented continuations — the same shape Slack itself uses.
+ * the rest are indented continuations, the same shape Slack itself uses.
+ * Whether this message is a continuation is decided in MessageList, which can
+ * see its neighbours; here it is just a flag.
  *
  * Deliberately built from positioners (Column/Row/Flow) with explicit widths
  * rather than QtQuick Layouts. A Layout sizes itself from a wrapping Text whose
  * height in turn depends on the width the Layout hands it, so every delegate
- * resolved its height in two passes; in a bottom-up ListView that shifts the
- * content origin on each pass and the transcript visibly flickers while
- * scrolling. Widths here flow strictly downwards, so heights settle in one pass.
+ * resolved its height in two passes, and a list of two-pass delegates cannot
+ * scroll smoothly: contentHeight moves under the view while it is drawing.
+ * Widths here flow strictly downwards, so heights settle in one pass.
+ *
+ * The body stays Text.RichText rather than the much cheaper Text.StyledText,
+ * because StyledText's <font> understands colour and size but not face, and
+ * losing the monospace font on every code span is a worse trade than the
+ * layout it saves. The rendering cost is paid once per delegate now that the
+ * list diffs its model instead of rebuilding it.
  */
 Item {
     id: root
 
     required property var msg
-    property var olderMsg: null
+    property bool grouped: false
     property var users: ({})
     property var customEmoji: ({})
     property var avatarMap: ({})
+    property var unfurls: ({})
     property string meId: ""
     property bool inThread: false
     property real avatarSize: 26 * Style.uiScaleRatio
@@ -34,17 +43,40 @@ Item {
     signal reactionToggled(string ts, string name, bool mine)
     signal copyRequested(string text)
 
-    readonly property bool grouped: {
-        if (!olderMsg || inThread)
-            return false;
-        if (olderMsg.user !== msg.user || olderMsg.author !== msg.author)
-            return false;
-        return Math.abs(parseFloat(msg.ts) - parseFloat(olderMsg.ts)) < 300;
-    }
-
     readonly property date stamp: new Date(parseFloat(msg.ts) * 1000)
     readonly property real topPad: grouped ? Style.marginXXS : Style.marginS
     readonly property real gutter: avatarSize + Style.marginS
+
+    // Previews, in the order Slack shows them: whatever Slack unfurled itself
+    // first, then anything we crawled for links it left alone. Capped, because
+    // a message with a dozen links should not become a wall of cards.
+    readonly property var cards: {
+        const out = [];
+        for (const att of (root.msg.attachments || [])) {
+            if (!att.title && !att.text && !att.image)
+                continue;
+            out.push({
+                url: att.url || att.fromUrl || "",
+                site: att.site || att.author || "",
+                title: att.title || "",
+                description: att.previewText || "",
+                image: att.image || "",
+                icon: att.siteIcon || "",
+                color: att.color || ""
+            });
+            if (out.length >= 3)
+                return out;
+        }
+        for (const link of (root.msg.links || [])) {
+            const card = root.unfurls[link];
+            if (!card)
+                continue;
+            out.push(card);
+            if (out.length >= 3)
+                return out;
+        }
+        return out;
+    }
 
     implicitHeight: topPad + column.height
     height: implicitHeight
@@ -123,56 +155,15 @@ Item {
             }
         }
 
-        // Attachments (link unfurls, bot cards)
+        // Link previews: Slack's own unfurls and the ones slack.sh crawled.
         Repeater {
-            model: root.msg.attachments || []
+            model: root.cards
 
-            delegate: Item {
-                id: attachment
-
+            delegate: LinkCard {
                 required property var modelData
 
                 width: column.width
-                height: unfurl.height + Style.marginXS
-
-                Rectangle {
-                    width: Style.borderM
-                    height: parent.height
-                    radius: width
-                    color: Color.mOutline
-                }
-
-                Column {
-                    id: unfurl
-
-                    x: Style.marginS
-                    y: Style.marginXXS
-                    width: parent.width - Style.marginS
-                    spacing: 0
-
-                    NText {
-                        width: parent.width
-                        visible: text !== ""
-                        text: attachment.modelData.title || ""
-                        color: Color.mSecondary
-                        pointSize: Style.fontSizeXS
-                        font.weight: Style.fontWeightSemiBold
-                        wrapMode: Text.Wrap
-                        elide: Text.ElideRight
-                        maximumLineCount: 2
-                    }
-
-                    NText {
-                        width: parent.width
-                        visible: text !== ""
-                        text: Mrkdwn.preview(attachment.modelData.text || "", root.users)
-                        color: Color.mOnSurfaceVariant
-                        pointSize: Style.fontSizeXS
-                        wrapMode: Text.Wrap
-                        elide: Text.ElideRight
-                        maximumLineCount: 3
-                    }
-                }
+                card: modelData
             }
         }
 
@@ -291,17 +282,37 @@ Item {
 
                 spacing: Style.marginXS
 
+                Repeater {
+                    model: (root.msg.replyUsers || []).slice(0, 3)
+
+                    delegate: NImageRounded {
+                        required property var modelData
+
+                        width: Math.round(14 * Style.uiScaleRatio)
+                        height: width
+                        radius: width / 2
+                        // Ids, not URLs: the mirrored avatar beats a network
+                        // fetch here for the same reason it does above.
+                        imagePath: root.avatarMap[modelData] || (root.users[modelData] ? (root.users[modelData].image || "") : "")
+                        fallbackIcon: "user"
+                        fallbackIconSize: Style.fontSizeXXS
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+
                 NText {
                     text: root.msg.replyCount === 1 ? "1 reply" : (root.msg.replyCount + " replies")
                     color: Color.mSecondary
                     pointSize: Style.fontSizeXXS
                     font.weight: Style.fontWeightSemiBold
+                    anchors.verticalCenter: parent.verticalCenter
                 }
 
                 NIcon {
                     icon: "chevron-right"
                     color: Color.mSecondary
                     pointSize: Style.fontSizeXS
+                    anchors.verticalCenter: parent.verticalCenter
                 }
             }
 

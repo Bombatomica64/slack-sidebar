@@ -8,3 +8,10 @@ settings.json
 *.bak
 *.bak-*
 *~
+
+# Compiled link-preview helper, when built in-tree rather than into the cache dir
+native/slack-unfurl
+*.o
+
+# Byte-compiled Python from py_compile runs
+__pycache__/

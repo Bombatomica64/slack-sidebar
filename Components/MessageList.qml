@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQml.Models
 import QtQuick.Layouts
 import qs.Commons
 import qs.Widgets
@@ -9,14 +10,24 @@ import qs.Widgets
  * The transcript.
  *
  * Messages arrive newest-first (that is what conversations.history returns) and
- * are reversed here so the view runs oldest -> newest, top to bottom.
+ * are reversed here so the view runs oldest -> newest, top to bottom. A
+ * bottom-up ListView looks like the natural fit for a chat, but it puts the
+ * content origin at a negative value, which every piece of scroll arithmetic
+ * downstream then has to special-case. Ordinary top-down order keeps that
+ * arithmetic honest, and "newest at the bottom" becomes just positioning at the
+ * end.
  *
- * A bottom-up ListView looks like the natural fit for a chat, but NListView's
- * scroll maths assumes the content origin is zero: clampScrollY() clamps
- * contentY to [0, contentHeight - height]. Under BottomToTop the origin is
- * negative, so every wheel event was clamped back to 0 and the view snapped
- * instead of scrolling. Ordinary top-down order keeps that maths valid, and
- * "newest at the bottom" becomes just positioning at the end.
+ * The model is a ListModel that is *diffed*, not replaced. The old code handed
+ * the view a fresh JS array on every poll, which destroys and rebuilds every
+ * delegate: a few hundred text layouts, several times a minute, on the GUI
+ * thread. That is what the flicker and the lost scroll position were. Now a
+ * poll that changed nothing does nothing, and a poll that appended one message
+ * appends one row.
+ *
+ * Everything a delegate needs is computed here, once, into the row object:
+ * grouping, day separators and the unread marker all depend on a message's
+ * neighbours, and working that out inside a delegate binding means redoing it
+ * every time the row is recycled.
  */
 Item {
     id: root
@@ -25,92 +36,239 @@ Item {
     property var users: ({})
     property var customEmoji: ({})
     property var avatarMap: ({})
+    property var unfurls: ({})
     property string meId: ""
     property string readCursor: ""
     property bool inThread: false
     property bool loading: false
     property string emptyText: "No messages yet"
 
+    // Changes when the view is showing a different conversation or thread.
+    // Scroll state is per-conversation: coming back to the list and opening
+    // something else should start at the bottom, not wherever you were.
+    property string sessionKey: ""
+
     signal threadRequested(string ts)
     signal reactionToggled(string ts, string name, bool mine)
     signal copyRequested(string text)
 
-    // Oldest first, for a top-down view.
-    readonly property var ordered: (messages || []).slice().reverse()
-
     // Set false as soon as the reader scrolls back, so a poll landing mid-read
-    // never yanks them to the bottom. The jump button puts it back.
+    // never yanks them to the bottom. Reaching the bottom again re-arms it,
+    // which is what Slack does too.
     property bool stickToLatest: true
+
+    readonly property bool showJumpButton: !stickToLatest && !list.atEnd && rows.count > 0
 
     function jumpToLatest() {
         root.stickToLatest = true;
         list.positionViewAtEnd();
     }
 
-    onOrderedChanged: if (root.stickToLatest)
-        Qt.callLater(list.positionViewAtEnd)
+    // ------------------------------------------------------------ row model
 
-    NListView {
+    // ts -> message. The model itself holds nothing but strings and booleans,
+    // because ListModel turns a nested JS object into its own value types on
+    // the way in and hands back something that is no longer the object you put
+    // there. Keeping the messages beside the model in a plain JS map sidesteps
+    // that entirely, and because the key is the timestamp it never goes stale
+    // the way an index would.
+    property var messageByKey: ({})
+
+    // What a delegate binds to for the one frame between the map being replaced
+    // and its row being removed.
+    readonly property var blankMessage: ({
+            ts: "0",
+            author: "",
+            html: "",
+            mine: false,
+            isBot: false,
+            reactions: [],
+            files: [],
+            attachments: [],
+            links: [],
+            replyUsers: [],
+            replyCount: 0
+        })
+
+    ListModel {
+        id: rows
+    }
+
+    function _dayLabel(stamp) {
+        const today = new Date();
+        if (stamp.toDateString() === today.toDateString())
+            return "Today";
+        const yesterday = new Date();
+        yesterday.setDate(today.getDate() - 1);
+        if (stamp.toDateString() === yesterday.toDateString())
+            return "Yesterday";
+        return Qt.formatDate(stamp, "ddd d MMM");
+    }
+
+    // Everything a delegate draws goes into this string, so a row whose
+    // signature is unchanged can keep the delegate it already has.
+    function _signature(msg, grouped, dayLabel, unreadMark) {
+        return [msg.html || "", msg.author || "", msg.replyCount || 0, JSON.stringify(msg.reactions || []), JSON.stringify(msg.files || []), JSON.stringify(msg.attachments || []), JSON.stringify(msg.links || []), grouped, dayLabel, unreadMark].join("");
+    }
+
+    function _buildRows() {
+        const source = root.messages || [];
+        const out = [];
+        const byKey = ({});
+        const cursor = root.readCursor === "" ? 0 : parseFloat(root.readCursor);
+        let seenUnread = false;
+
+        // Source is newest-first; walk it backwards to get oldest-first.
+        for (let i = source.length - 1; i >= 0; --i) {
+            const msg = source[i];
+            const older = i + 1 < source.length ? source[i + 1] : null;
+            const stamp = new Date(parseFloat(msg.ts) * 1000);
+
+            const startsNewDay = !older || stamp.toDateString() !== new Date(parseFloat(older.ts) * 1000).toDateString();
+
+            let grouped = false;
+            if (older && !root.inThread && older.user === msg.user && older.author === msg.author)
+                grouped = Math.abs(parseFloat(msg.ts) - parseFloat(older.ts)) < 300;
+            // A day separator or an unread rule between two messages breaks the
+            // group: a continuation under a divider reads as an orphan.
+            if (startsNewDay)
+                grouped = false;
+
+            let unreadMark = false;
+            if (!seenUnread && !root.inThread && cursor > 0 && !msg.mine && parseFloat(msg.ts) > cursor) {
+                unreadMark = true;
+                seenUnread = true;
+                grouped = false;
+            }
+
+            const dayLabel = startsNewDay ? root._dayLabel(stamp) : "";
+            const key = String(msg.ts);
+            byKey[key] = msg;
+            out.push({
+                key: key,
+                sig: root._signature(msg, grouped, dayLabel, unreadMark),
+                grouped: grouped,
+                dayLabel: dayLabel,
+                unreadMark: unreadMark
+            });
+        }
+        root.messageByKey = byKey;
+        return out;
+    }
+
+    // Bring the model in line with `next` by touching only what actually moved.
+    function _sync(next) {
+        const alive = ({});
+        for (const row of next)
+            alive[row.key] = true;
+
+        // Messages that fell out of the history window, or were deleted.
+        for (let i = rows.count - 1; i >= 0; --i)
+            if (!alive[rows.get(i).key])
+                rows.remove(i);
+
+        for (let i = 0; i < next.length; ++i) {
+            if (i >= rows.count) {
+                rows.append(next[i]);
+                continue;
+            }
+            const cur = rows.get(i);
+            if (cur.key !== next[i].key)
+                rows.insert(i, next[i]);
+            else if (cur.sig !== next[i].sig)
+                rows.set(i, next[i]);
+        }
+        while (rows.count > next.length)
+            rows.remove(rows.count - 1);
+    }
+
+    // Removing rows above the viewport shifts everything under them, which
+    // reads as the transcript jumping while you are trying to read it. Note
+    // where the topmost visible message sits, and put it back afterwards.
+    function _captureAnchor() {
+        if (root.stickToLatest || rows.count === 0)
+            return null;
+        const index = list.indexAt(1, list.contentY + 1);
+        if (index < 0 || index >= rows.count)
+            return null;
+        const item = list.itemAtIndex(index);
+        if (!item)
+            return null;
+        return {
+            key: rows.get(index).key,
+            offset: item.y - list.contentY
+        };
+    }
+
+    function _restoreAnchor(anchor) {
+        if (!anchor)
+            return;
+        for (let i = 0; i < rows.count; ++i) {
+            if (rows.get(i).key !== anchor.key)
+                continue;
+            const item = list.itemAtIndex(i);
+            if (item)
+                list.scrollTo(item.y - anchor.offset, false);
+            return;
+        }
+    }
+
+    function _refresh() {
+        const anchor = root._captureAnchor();
+        root._sync(root._buildRows());
+        if (root.stickToLatest)
+            Qt.callLater(list.positionViewAtEnd);
+        else
+            root._restoreAnchor(anchor);
+    }
+
+    onMessagesChanged: _refresh()
+    onReadCursorChanged: _refresh()
+    onInThreadChanged: _refresh()
+
+    onSessionKeyChanged: {
+        rows.clear();
+        root.stickToLatest = true;
+        list.scrollTo(0, false);
+        _refresh();
+    }
+
+    Component.onCompleted: _refresh()
+
+    // ----------------------------------------------------------------- view
+
+    SmoothList {
         id: list
 
         anchors.fill: parent
-        model: root.ordered
+        model: rows
         spacing: 0
         reserveScrollbarSpace: true
-        showGradientMasks: false
-        // Generous cache: delegates destroyed and rebuilt mid-scroll are what
-        // read as text blanking out, so keep more of them alive.
-        cacheBuffer: 2400
 
-        onDraggingChanged: if (dragging)
-            root.stickToLatest = false
-        onFlickingChanged: if (flicking)
-            root.stickToLatest = false
+        onScrolledByUser: root.stickToLatest = false
+        // Scrolling back down to the bottom means you have caught up, so start
+        // following again rather than making you press the jump button.
+        onAtEndChanged: if (list.atEnd)
+            root.stickToLatest = true
 
         delegate: Column {
             id: cell
 
-            required property var modelData
-            required property int index
+            required property string key
+            required property bool grouped
+            required property string dayLabel
+            required property bool unreadMark
+
+            readonly property var msg: root.messageByKey[cell.key] || root.blankMessage
 
             width: list.availableWidth
             spacing: 0
-
-            // Top-down order: the neighbour above is the older message.
-            readonly property var olderMsg: index > 0 ? root.ordered[index - 1] : null
-            readonly property date stamp: new Date(parseFloat(modelData.ts) * 1000)
-
-            readonly property string dayLabelText: {
-                const today = new Date();
-                const yesterday = new Date();
-                yesterday.setDate(today.getDate() - 1);
-                if (cell.stamp.toDateString() === today.toDateString())
-                    return "Today";
-                if (cell.stamp.toDateString() === yesterday.toDateString())
-                    return "Yesterday";
-                return Qt.formatDate(cell.stamp, "ddd d MMM");
-            }
-
-            readonly property bool startsNewDay: {
-                if (!cell.olderMsg)
-                    return true;
-                return cell.stamp.toDateString() !== new Date(parseFloat(cell.olderMsg.ts) * 1000).toDateString();
-            }
-
-            readonly property bool firstUnread: {
-                if (root.inThread || root.readCursor === "" || cell.modelData.mine)
-                    return false;
-                const cursor = parseFloat(root.readCursor);
-                if (parseFloat(cell.modelData.ts) <= cursor)
-                    return false;
-                return !cell.olderMsg || parseFloat(cell.olderMsg.ts) <= cursor;
-            }
 
             // Date separator
             Item {
                 width: cell.width
                 height: visible ? Math.round(22 * Style.uiScaleRatio) : 0
-                visible: cell.startsNewDay
+                visible: cell.dayLabel !== ""
 
                 NDivider {
                     anchors.verticalCenter: parent.verticalCenter
@@ -118,16 +276,16 @@ Item {
 
                 Rectangle {
                     anchors.centerIn: parent
-                    width: dayLabel.implicitWidth + Style.marginM
-                    height: dayLabel.implicitHeight + Style.marginXXS
+                    width: dayText.implicitWidth + Style.marginM
+                    height: dayText.implicitHeight + Style.marginXXS
                     radius: height / 2
                     color: Color.mSurface
 
                     NText {
-                        id: dayLabel
+                        id: dayText
 
                         anchors.centerIn: parent
-                        text: cell.dayLabelText
+                        text: cell.dayLabel
                         color: Color.mOnSurfaceVariant
                         pointSize: Style.fontSizeXXS
                         font.weight: Style.fontWeightSemiBold
@@ -139,7 +297,7 @@ Item {
             Item {
                 width: cell.width
                 height: visible ? Math.round(20 * Style.uiScaleRatio) : 0
-                visible: cell.firstUnread
+                visible: cell.unreadMark
 
                 Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
@@ -152,13 +310,13 @@ Item {
                 Rectangle {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.right: parent.right
-                    width: newLabel.implicitWidth + Style.marginS
-                    height: newLabel.implicitHeight + Style.marginXXS
+                    width: newText.implicitWidth + Style.marginS
+                    height: newText.implicitHeight + Style.marginXXS
                     radius: height / 2
                     color: Color.mError
 
                     NText {
-                        id: newLabel
+                        id: newText
 
                         anchors.centerIn: parent
                         text: "new"
@@ -171,11 +329,12 @@ Item {
 
             MessageItem {
                 width: cell.width
-                msg: cell.modelData
-                olderMsg: cell.olderMsg
+                msg: cell.msg
+                grouped: cell.grouped
                 users: root.users
                 customEmoji: root.customEmoji
                 avatarMap: root.avatarMap
+                unfurls: root.unfurls
                 meId: root.meId
                 inThread: root.inThread
                 onThreadRequested: ts => root.threadRequested(ts)
@@ -190,7 +349,7 @@ Item {
         anchors.centerIn: parent
         width: parent.width * 0.7
         spacing: Style.marginS
-        visible: root.ordered.length === 0
+        visible: rows.count === 0
 
         NIcon {
             Layout.alignment: Qt.AlignHCenter
@@ -214,7 +373,7 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         anchors.bottomMargin: Style.marginS
-        visible: !root.stickToLatest && root.ordered.length > 0
+        visible: root.showJumpButton
         icon: "arrow-down"
         baseSize: 26
         tooltipText: "Jump to latest"

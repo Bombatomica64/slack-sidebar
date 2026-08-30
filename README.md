@@ -267,9 +267,11 @@ That costs a compiler floor, and the floor turned out to be **clang only**:
 | gcc 14 | internal compiler error on this code under every flag combination tried — `gen_enumeration_type_die` (dwarf2out.cc) with debug info, `nothrow_spec_p` (cp/except.cc) without it |
 
 Modules plus Qt headers of this size is simply more than gcc's implementation
-currently handles. gcc 15 may well be fine; nothing here could test it, so the
-Makefile refuses gcc with that explanation and `ALLOW_GCC=1` lifts the gate for
-anyone who wants to find out. The gcc module build rules are kept for that day.
+currently handles. gcc 15 might be fine — no machine here had it — so rather
+than leave that as folklore, CI asks on every push: the non-blocking
+`gcc-modules-probe` job installs gcc 15, builds with `ALLOW_GCC=1` (which lifts
+the Makefile's gate), and writes the answer into the run summary. The gcc module
+build rules are kept for the day it says yes.
 
 Three consequences worth knowing:
 
@@ -335,6 +337,7 @@ machine does not.
 | Job | What it gates |
 | --- | --- |
 | `native` | builds and runs the tests with `-Werror`, then checks the agent answers with no keyring and refuses a loopback URL |
+| `gcc-modules-probe` | **non-blocking.** Installs gcc 15 and tries the build, so every push re-asks whether gcc can compile this yet. The answer lands in the run summary. |
 | `sanitizers` | the same tests under ASan + UBSan (clang) |
 | `fuzz` | two minutes of libFuzzer over the parser, uploading any crashing input as an artifact |
 | `qml` | parses every `.qml` with `qmlformat` |

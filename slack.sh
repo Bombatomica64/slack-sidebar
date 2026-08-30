@@ -756,38 +756,29 @@ newest_unfurl_source() {
 }
 
 # Built on demand rather than at install time: the plugin is cloned, not
-# packaged, and a compiler is not a dependency — when there is none, or the
-# build fails, the shell fallback below still produces a card.
+# packaged, and a compiler is not a dependency — when there is none, or it is
+# too old for C++20 modules, the shell fallback below still produces a card.
+#
+# The build is `make` and only `make`: the library is a named module, and the
+# two compilers spell module compilation so differently that open-coding a
+# second copy of those rules here would be a copy that silently rots.
 build_unfurl_helper() {
-  [[ -f "$UNFURL_SRC_DIR/html_meta.cpp" ]] || return 1
+  [[ -f "$UNFURL_SRC_DIR/html_meta.cppm" ]] || return 1
+  command -v make >/dev/null 2>&1 || return 1
   mkdir -p "$CACHE_DIR/bin" 2>/dev/null || return 1
 
-  # The Makefile owns the flag set and picks the newest standard the compiler
-  # admits to, so prefer it. Build outside the clone: the plugin directory is
-  # somebody's checkout, not a scratch space.
-  if command -v make >/dev/null 2>&1; then
+  # Build outside the clone: the plugin directory is somebody's checkout, not a
+  # scratch space. The Makefile refuses a compiler too old for modules and says
+  # which ones work, so its log is worth keeping when this fails.
+  local cxx
+  for cxx in "" clang++ g++-15 g++-14; do
+    [[ -n "$cxx" ]] && ! command -v "$cxx" >/dev/null 2>&1 && continue
     if make -C "$SCRIPT_DIR" --no-print-directory \
-         PREFIX="$CACHE_DIR" BUILDDIR="$CACHE_DIR/build" install \
+         ${cxx:+CXX="$cxx"} PREFIX="$CACHE_DIR" BUILDDIR="$CACHE_DIR/build" install \
          >>"$UNFURL_BUILD_LOG" 2>&1 && [[ -x "$UNFURL_BIN" ]]; then
       return 0
     fi
-  fi
-
-  # No make: reproduce just enough of it by hand. C++26 is what the source
-  # targets; the older standards are here so a 2023-vintage toolchain still
-  # gets the fast parser.
-  local cxx std tmp="$UNFURL_BIN.$$"
-  for cxx in clang++ g++ c++; do
-    command -v "$cxx" >/dev/null 2>&1 || continue
-    for std in c++2c c++23 c++2b c++20; do
-      if "$cxx" "-std=$std" -O2 -o "$tmp" \
-           "$UNFURL_SRC_DIR/html_meta.cpp" "$UNFURL_SRC_DIR/unfurl_main.cpp" \
-           >>"$UNFURL_BUILD_LOG" 2>&1; then
-        mv -f "$tmp" "$UNFURL_BIN" && return 0
-      fi
-    done
   done
-  rm -f "$tmp" 2>/dev/null
   return 1
 }
 

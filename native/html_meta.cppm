@@ -1,21 +1,90 @@
 // SPDX-License-Identifier: MIT
 //
-// Why this is C++ rather than sed and jq: the input is untrusted HTML in an
-// unknown encoding. A head-first scan with quoted, unquoted and bare
-// attributes, comment and <script> skipping, entity decoding, cp1252
-// transcoding, relative-URL resolution and UTF-8-safe truncation is slow and
-// fragile in POSIX tools; here it is one pass over the buffer with no process
-// per tag.
+// Link-preview metadata, extracted from a fetched HTML page.
+//
+// A C++20 module rather than a header/source pair. The whole native side is a
+// handful of translation units, so the compile-time argument for modules is
+// worth nothing here; what they buy is that there is one file per component
+// instead of two that have to be kept in step, and that nothing leaks out of it
+// except what `export` names.
+//
+// Kept deliberately importable-without-std-module: `import std;` needs gcc 15
+// or libc++'s prebuilt std module, and this plugin has to build on whatever
+// compiler the user's distro shipped. The standard library comes in through the
+// global module fragment instead.
 
-#include "html_meta.hpp"
+module;
 
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <initializer_list>
 #include <ostream>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+export module slack.html;
+
+export namespace slack::html {
+// A <head> that has not produced OpenGraph tags within a megabyte is not going
+// to; the cap also bounds what a hostile page can make us allocate.
+inline constexpr std::size_t kMaxInput = std::size_t{1} << 20;
+inline constexpr std::size_t kTitleMax = 300;
+inline constexpr std::size_t kDescMax = 600;
+
+// What a preview card needs, and nothing else. Every field is UTF-8 and may be
+// empty; the caller decides whether what is left is worth drawing.
+struct Meta {
+    std::string url;          // the link as the message wrote it
+    std::string finalUrl;     // where the fetch ended up after redirects
+    std::string canonical;    // og:url or <link rel=canonical>, else finalUrl
+    std::string site;         // og:site_name, else the host
+    std::string title;
+    std::string description;
+    std::string image;        // absolute
+    std::string icon;         // absolute, /favicon.ico as the last resort
+    std::string kind;         // og:type
+};
+
+// Parse a document. `source` is the URL as written, `effective` the one the
+// fetch ended on: relative hrefs resolve against the latter, and an empty
+// `effective` falls back to `source`.
+[[nodiscard]] Meta parse(std::string_view document, std::string_view source, std::string_view effective);
+
+// Write `meta` as one JSON object, newline-terminated.
+void write_json(std::ostream& os, const Meta& meta);
+
+// --- pieces, public because they are what the tests actually pin down -------
+
+// Named and numeric HTML entities to UTF-8. Unrecognised references are left
+// as written, which is what a browser does with them too.
+[[nodiscard]] std::string decode_entities(std::string_view in);
+
+// Runs of whitespace to a single space, with the ends trimmed.
+[[nodiscard]] std::string collapse_ws(std::string_view in);
+
+// Cut to at most `max` bytes on a codepoint boundary, marking the cut.
+[[nodiscard]] std::string truncate_utf8(std::string s, std::size_t max);
+
+// Replace anything that is not well-formed UTF-8 with U+FFFD. Everything we
+// print goes through here, so a page with a broken byte can never produce JSON
+// that the caller refuses to parse.
+[[nodiscard]] std::string sanitize_utf8(std::string_view in);
+
+// Reinterpret a byte string as windows-1252 (which is also how browsers read a
+// page that declares latin-1, or declares nothing).
+[[nodiscard]] std::string transcode_cp1252(std::string_view in);
+
+// Resolve `ref` against `base`. Returns empty for anything that is not http(s),
+// so a data: or javascript: href can never reach the UI.
+[[nodiscard]] std::string resolve_url(std::string_view base, std::string_view ref);
+
+// Hostname of an absolute URL, without userinfo, port, or a leading "www.".
+[[nodiscard]] std::string host_of(std::string_view url);
+}  // namespace slack::html
 
 namespace slack::html {
 namespace {
@@ -134,8 +203,12 @@ const std::unordered_map<string_view, char32_t>& entity_table() {
     return table;
 }
 
+// Sanitising comes first, and the order matters: a replacement character is
+// three bytes where the byte it replaced was one, so scrubbing after truncating
+// pushes the result back over the cap. (The fuzzer found exactly that, in the
+// first version of this fix.)
 [[nodiscard]] string clean_text(string_view raw, size_t max) {
-    return truncate_utf8(collapse_ws(decode_entities(raw)), max);
+    return truncate_utf8(collapse_ws(decode_entities(sanitize_utf8(raw))), max);
 }
 
 // ------------------------------------------------------------------- urls
@@ -167,7 +240,10 @@ struct SplitUrl {
     const size_t colon = url.find("://");
     if (colon == string_view::npos)
         return out;
-    out.scheme.assign(url.substr(0, colon));
+    // Schemes are case-insensitive; everything that compares one downstream -
+    // slack.sh's address guard, the QML card's local-vs-remote test - is not.
+    // Normalise once, here, rather than making each of them tolerant.
+    out.scheme = to_lower(url.substr(0, colon));
     const string_view rest = url.substr(colon + 3);
     const size_t slash = rest.find_first_of("/?#");
     if (slash == string_view::npos) {
@@ -637,6 +713,15 @@ string resolve_url(string_view base, string_view ref_in) {
     const string_view ref = trim(ref_in);
     if (ref.empty())
         return {};
+    // A control character (a NUL especially) is not something RFC 3986 admits,
+    // and each consumer downstream mangles it differently - a NUL truncates the
+    // argv element handed to xdg-open. Refuse rather than guess. Found by the
+    // fuzzer.
+    for (const char c : ref) {
+        const auto byte = static_cast<unsigned char>(c);
+        if (byte < 0x20 || byte == 0x7F)
+            return {};
+    }
     if (ref.starts_with("data:") || ref.starts_with("javascript:") || ref.starts_with("about:"))
         return {};
     if (ref.starts_with("//")) {
@@ -644,9 +729,17 @@ string resolve_url(string_view base, string_view ref_in) {
         return (b.scheme.empty() ? string("https") : b.scheme) + ":" + string(ref);
     }
     if (has_scheme(ref)) {
-        // Only http(s) ends up in a card; anything else is not ours to open.
-        const string s = to_lower(ref.substr(0, ref.find(':')));
-        return (s == "http" || s == "https") ? string(ref) : string();
+        // Only http(s) ends up in a card, and the authority is required too:
+        // "https:nonsense" has a scheme we accept and is still not something
+        // any fetcher or xdg-open can do anything with. Checking the scheme
+        // alone let those through (found by the fuzzer).
+        const string lowered = to_lower(ref);
+        const size_t scheme_len = lowered.starts_with("https://") ? 8 : (lowered.starts_with("http://") ? 7 : 0);
+        if (scheme_len == 0)
+            return {};
+        // Keep the lowercased scheme, keep the rest of the URL exactly as the
+        // page wrote it: paths and queries are case-sensitive.
+        return lowered.substr(0, scheme_len) + string(ref.substr(scheme_len));
     }
     const SplitUrl b = split_url(base);
     if (b.authority.empty())
@@ -663,7 +756,7 @@ string resolve_url(string_view base, string_view ref_in) {
 }
 
 string host_of(string_view url) {
-    string authority = split_url(url).authority;
+    string authority = to_lower(split_url(url).authority);
     if (const size_t at = authority.find('@'); at != string::npos)
         authority.erase(0, at + 1);
     if (const size_t colon = authority.find(':'); colon != string::npos)
@@ -720,6 +813,22 @@ Meta parse(string_view document, string_view source, string_view effective) {
         meta.site = host_of(meta.canonical);
 
     meta.kind = clean_text(pick(doc, {"og:type"}), 40);
+
+    // A backstop over everything on the way out, rather than trusting each
+    // field's own path to have done it. A page that declares a charset we do not
+    // transcode (or a plausible-looking one that is a lie) leaves raw non-UTF-8
+    // bytes in the markup, and they otherwise travel all the way into Meta:
+    // write_json scrubs what it prints, but a caller that uses these fields
+    // in-process rather than through the JSON gets the bad bytes. Found by the
+    // fuzzer, on a page declaring "ISO-885<0x96>9-1".
+    //
+    // For anything that came through clean_text this is now a no-op; it is the
+    // URLs, built straight from attribute bytes, that still need it.
+    for (string* field : {&meta.url, &meta.finalUrl, &meta.canonical, &meta.site,
+                          &meta.title, &meta.description, &meta.image, &meta.icon, &meta.kind}) {
+        if (const string clean = sanitize_utf8(*field); clean != *field)
+            *field = clean;
+    }
     return meta;
 }
 
@@ -736,5 +845,4 @@ void write_json(std::ostream& os, const Meta& meta) {
     field(os, "kind", meta.kind);
     os << "}\n";
 }
-
 }  // namespace slack::html

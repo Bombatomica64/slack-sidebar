@@ -147,6 +147,25 @@ you have open is polled faster, on its own timer.
   notification daemons want a real file; the same local files are used in the
   transcript so an avatar cannot pop in late while scrolling.
 
+Message text is rendered through `Components/Mrkdwn.js`: mentions, channel
+links, URLs, `*bold*`, `_italic_`, `~strike~`, inline code, fenced blocks,
+blockquotes and `:emoji:`.
+
+### Emoji
+
+- **Standard shortcodes** resolve from a curated table of ~165 common codes
+  (`:tada:`, `:joy:`, `:thumbsup:`…). Anything outside it stays as literal
+  `:text:`. Noctalia's own 1870-entry emoji dataset is deliberately *not* used as
+  a fallback: it is keyed by CLDR description (`face_with_tears_of_joy`) rather
+  than Slack shortcode (`joy`), and testing it against known-correct codes
+  resolved only 77 of 164 — 12 of those to the wrong glyph.
+- **Custom workspace emoji** work. `slack.sh emoji` mirrors them from
+  `emoji.list` into `~/.cache/noctalia-slack/emoji-img/` once and renders them
+  inline as local images, including one level of `alias:` indirection. Remote
+  URLs are not used directly because Qt rich text loads them unreliably.
+- Shortcodes inside `` `code` `` and fenced blocks are left as text, not
+  substituted.
+
 ## Link previews
 
 Slack unfurls some links itself and sends the result in `attachments`; those are
@@ -177,9 +196,18 @@ What is and is not fetched:
 Reading metadata out of arbitrary HTML in an unknown encoding is the one part of
 this plugin that is not a good fit for shell: quoted, unquoted and bare
 attributes, comment and `<script>` skipping, entity decoding, cp1252 pages, and
-truncation that does not cut a UTF-8 character in half. `native/html_meta.cpp`
+truncation that does not cut a UTF-8 character in half. `native/html_meta.cppm`
 does it in a single pass — C++26, built with clang or gcc at whatever standard
 the toolchain accepts, `c++2c` first.
+
+It is a hand-written scanner rather than a call into an HTML5 parser, and that
+is a deliberate trade rather than an oversight. A real parser (lexbor, gumbo)
+builds a DOM for a document we only ever ask nine questions about, and neither
+is packaged on Debian or Ubuntu — lexbor is not there at all, gumbo has been
+unmaintained since 2016 — so using one would mean vendoring a whole HTML5
+implementation into a plugin people install by cloning. The scanner is ~250
+lines, never allocates a tree, and is fuzzed. If it ever needs to answer
+questions about the document *body*, that trade flips and a library wins.
 
 You do not have to build anything: the first link preview runs `make` for you
 and installs the helper into `~/.cache/noctalia-slack/bin/`, and if there is no
@@ -193,9 +221,10 @@ not pay for the attempt on every link.
 ```sh
 make                 # build the helper into build/
 make test            # unit tests
+make fuzz            # fuzz the parser (clang only; FUZZ_TIME=300 for longer)
 make check           # what CI gates on: strict warnings, tests, sanitizers, QML parse
 make install         # copy it where slack.sh looks
-make print-config    # which compiler and standard were chosen
+make print-config    # which compiler, standard and version were chosen
 ```
 
 Plain GNU make, no CMake: the native side is three translation units, and a
@@ -204,10 +233,57 @@ wants to review.
 
 | Knob | Effect |
 | --- | --- |
-| `CXX=g++` | pick a compiler (default: `clang++` if installed) |
+| `CXX=g++-14` | pick a compiler (default: `clang++` if installed) |
+| `OPT=-O0` | optimisation level (use this, not `CXXFLAGS=`, which would drop `-std`) |
 | `STRICT=1` | `-Werror` |
-| `SANITIZE=1` | AddressSanitizer + UndefinedBehaviorSanitizer |
+| `SANITIZE=1` | AddressSanitizer + UndefinedBehaviorSanitizer (clang only, see below) |
 | `PORTABLE=1` | static libstdc++/libgcc, for release artifacts |
+
+### Modules, and the compiler floor they cost
+
+The parser is a **C++20 named module** (`native/html_meta.cppm`), not a
+header/source pair: one file per component instead of two that have to be kept
+in step, and nothing escapes it but what `export` names.
+
+That costs a compiler floor — **clang ≥ 17 or gcc ≥ 14** — and the Makefile
+refuses anything older by version rather than letting you discover why the hard
+way. gcc 13, still the default on Ubuntu 24.04 LTS, *segfaults* compiling a
+four-line program that imports a module and uses `std::string` at `-O2`. That is
+not something a build can work around.
+
+Three consequences worth knowing:
+
+- The standard library still comes in by `#include`, in the module's global
+  module fragment. `import std;` needs gcc 15 or libc++'s prebuilt std module,
+  and neither is a thing this plugin can require.
+- **In a file that imports the module, `#include` directives must come first.**
+  gcc (13 and 14 alike) does not reconcile a std header included in the importer
+  with the same header pulled in by the module's global module fragment, and
+  reports every entity in it as a redefinition. Includes first, imports second.
+- **The sanitized and fuzzed builds are clang-only.** gcc 14 hits an internal
+  compiler error (`cp/module.cc:9455`) compiling a module unit with `-fsanitize`
+  at all. `make check` under gcc says so and carries on; `make SANITIZE=1` under
+  gcc refuses with the reason.
+
+If your compiler is too old, nothing breaks: `slack.sh` falls back to its
+grep/sed parser and link previews keep working, slightly less well.
+
+### Fuzzing
+
+The parser reads bytes chosen by whoever owns the page behind a pasted link, so
+it is fuzzed with libFuzzer under ASan and UBSan, over a small checked-in corpus
+in `native/tests/corpus/`. The target asserts the parser's *contract*, not just
+"did not crash": every field it returns is valid UTF-8, capped fields respect
+their caps, and every URL it emits starts with a lowercase `http://` or
+`https://`.
+
+That has been worth it. Four bugs so far, none of which anyone had thought to
+write a test for — non-UTF-8 bytes escaping into the result from a page with an
+unrecognised charset; the fix for that one breaking the length cap, because
+scrubbing after truncating turns one byte into three; a URL with an accepted
+scheme but no authority (`https:nonsense`) passing as fetchable; and a
+mixed-case scheme reaching a downstream guard that only compares lowercase.
+Each is now also a unit test.
 
 The warning set is `-Wall -Wextra -Wpedantic` plus the conversion, shadow,
 old-style-cast and cast-alignment families — the ones that matter when the input
@@ -225,8 +301,9 @@ machine does not.
 
 | Job | What it gates |
 | --- | --- |
-| `native` | builds and runs the tests under **both** clang and gcc with `-Werror` |
-| `sanitizers` | the same tests under ASan + UBSan, which is where a parser fed hostile bytes earns its test suite |
+| `native` | builds and runs the tests under **both** clang and gcc-14 with `-Werror` |
+| `sanitizers` | the same tests under ASan + UBSan (clang) |
+| `fuzz` | two minutes of libFuzzer over the parser, uploading any crashing input as an artifact |
 | `qml` | parses every `.qml` with `qmlformat` |
 | `scripts` | `bash -n` and `shellcheck` on `slack.sh`, `py_compile` on `oauth-login.py`, and a check that every setting `Settings.qml` saves has a default in `manifest.json` |
 
@@ -240,25 +317,6 @@ of error that otherwise shows up as a silently blank sidebar.
 no libstdc++/libgcc in its needed list, and attaches it to the release with a
 `sha256`. That artifact is a convenience for machines with no compiler — the
 supported install path is still the clone, which builds the helper itself.
-
-Message text is rendered through `Components/Mrkdwn.js`: mentions, channel
-links, URLs, `*bold*`, `_italic_`, `~strike~`, inline code, fenced blocks,
-blockquotes and `:emoji:`.
-
-### Emoji
-
-- **Standard shortcodes** resolve from a curated table of ~165 common codes
-  (`:tada:`, `:joy:`, `:thumbsup:`…). Anything outside it stays as literal
-  `:text:`. Noctalia's own 1870-entry emoji dataset is deliberately *not* used as
-  a fallback: it is keyed by CLDR description (`face_with_tears_of_joy`) rather
-  than Slack shortcode (`joy`), and testing it against known-correct codes
-  resolved only 77 of 164 — 12 of those to the wrong glyph.
-- **Custom workspace emoji** work. `slack.sh emoji` mirrors them from
-  `emoji.list` into `~/.cache/noctalia-slack/emoji-img/` once and renders them
-  inline as local images, including one level of `alias:` indirection. Remote
-  URLs are not used directly because Qt rich text loads them unreliably.
-- Shortcodes inside `` `code` `` and fenced blocks are left as text, not
-  substituted.
 
 ## Scrolling
 
@@ -295,9 +353,9 @@ The transcript is built to hold a steady frame at 120 Hz.
 | `Panel.qml` | the sidebar shell and view switching |
 | `BarWidget.qml` | bar entry and unread badge |
 | `Settings.qml` | side, width, intervals, notification toggles |
-| `native/html_meta.{hpp,cpp}` | C++26 HTML metadata parser behind the link previews |
+| `native/html_meta.cppm` | C++26 HTML metadata parser behind the link previews, as a named module |
 | `native/unfurl_main.cpp` | its command-line front end (`slack-unfurl`) |
-| `native/tests/` | unit tests for the parser |
+| `native/tests/` | unit tests, the fuzz target and its corpus |
 | `Makefile` | builds the above; see **Building** |
 | `Components/` | `ConversationList`, `MessageList`, `MessageItem`, `SmoothList`, `LinkCard`, `Composer`, `Mrkdwn.js` |
 

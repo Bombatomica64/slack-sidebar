@@ -7,13 +7,18 @@
 // under -fsanitize=address,undefined in CI, which is where most of the value
 // of testing a parser on hostile input actually comes from.
 
-#include "../html_meta.hpp"
-
 #include <cstddef>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <string_view>
+
+// The standard-library includes come before `import`, and have to: gcc (13 and
+// 14 alike) does not reconcile a std header included here with the same header
+// pulled in by the module's global module fragment, and reports every entity in
+// it as a redefinition. Including first and importing second is the order that
+// works on both compilers.
+import slack.html;
 
 namespace {
 
@@ -137,6 +142,15 @@ void test_urls() {
     expect_eq(resolve_url(base, "data:image/png;base64,AAAA"), "", "url: data rejected");
     expect_eq(resolve_url(base, "ftp://example.com/x"), "", "url: ftp rejected");
     expect_eq(resolve_url(base, ""), "", "url: empty");
+    // Regressions, all three found by the fuzzer rather than by anyone's
+    // imagination. A scheme we accept is not enough on its own.
+    expect_eq(resolve_url(base, "https:n/e.te"), "", "url: http(s) scheme without an authority rejected");
+    expect_eq(resolve_url(base, "http:"), "", "url: bare scheme rejected");
+    expect_eq(resolve_url(base, "HTTPS://Example.test/X?a=B"), "https://Example.test/X?a=B",
+              "url: scheme lowercased, the rest left alone");
+    expect_eq(resolve_url(base, std::string("/a\x01") + "b"), "", "url: control character rejected");
+    expect_eq(resolve_url(base, std::string("/a\0b", 4)), "", "url: embedded NUL rejected");
+    expect_eq(host_of("https://WWW.Example.COM/x"), "example.com", "host: lowercased");
 
     expect_eq(host_of("https://www.example.com:8443/x"), "example.com", "host: strips www and port");
     expect_eq(host_of("http://user:pw@example.org/x"), "example.org", "host: strips userinfo");
@@ -186,6 +200,22 @@ void test_title_fallbacks() {
               "", "fallback: <title> after <body> ignored");
     expect_eq(parse("<html><head></head></html>").site, "example.com",
               "fallback: site name falls back to the host");
+}
+
+void test_hostile_bytes_never_escape() {
+    // A charset that is neither UTF-8 nor one of the latin-1 spellings leaves
+    // the raw bytes in place, and they used to travel into Meta untouched;
+    // write_json scrubbed what it printed, but an in-process caller got them.
+    const Meta m = parse("<html><head><meta charset=\"ISO-885\x96" "9-1\"><title>Caf\xe9</title></head></html>");
+    expect_eq(slack::html::sanitize_utf8(m.title), m.title, "hostile: title is valid UTF-8 whatever the page claimed");
+
+    // And scrubbing has to happen before truncating: a replacement character is
+    // three bytes where the byte it replaced was one, so doing it the other way
+    // round pushes a capped field back over its cap.
+    const std::string many(400, '\xe1');
+    const Meta big = parse("<html><head><title>" + many + "</title></head></html>");
+    expect_true(big.title.size() <= slack::html::kTitleMax + 8, "hostile: title still respects its cap after scrubbing");
+    expect_eq(slack::html::sanitize_utf8(big.title), big.title, "hostile: truncated title is still valid UTF-8");
 }
 
 void test_charset() {
@@ -240,6 +270,7 @@ int main() {
     test_opengraph();
     test_comments_and_scripts_are_skipped();
     test_title_fallbacks();
+    test_hostile_bytes_never_escape();
     test_charset();
     test_malformed_input_terminates();
     test_json_is_wellformed();

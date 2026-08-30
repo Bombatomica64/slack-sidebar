@@ -8,12 +8,17 @@
 // Prints one JSON object on stdout and always exits 0: the caller treats a
 // missing field as "nothing worth showing", never as an error.
 
-#include "html_meta.hpp"
-
 #include <array>
 #include <cstddef>
 #include <iostream>
 #include <string>
+
+// The standard-library includes come before `import`, and have to: gcc (13 and
+// 14 alike) does not reconcile a std header included here with the same header
+// pulled in by the module's global module fragment, and reports every entity in
+// it as a redefinition. Including first and importing second is the order that
+// works on both compilers.
+import slack.html;
 
 namespace {
 

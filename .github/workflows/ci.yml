@@ -20,9 +20,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cxx: [clang++, g++]
+        # g++-14, not the runner's default g++: the library is a C++20 named
+        # module and gcc 13 segfaults compiling a four-line program that imports
+        # one and uses std::string at -O2. The Makefile refuses it by version
+        # rather than letting anyone hit that.
+        cxx: [clang++, g++-14]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install the compiler
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends g++-14
 
       - name: Show the toolchain the build settled on
         run: make CXX=${{ matrix.cxx }} print-config
@@ -39,11 +46,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The parser's whole job is to survive bytes chosen by someone else, so
-      # this is the pass that actually earns its runtime. gcc rather than clang
-      # only because its sanitizer runtime is always present on the runner.
+      # clang, not gcc: gcc 14 ICEs compiling a module unit with -fsanitize
+      # (cp/module.cc:9455). The Makefile refuses that combination outright.
+      - name: Make sure clang's sanitizer runtime is present
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends clang libclang-rt-dev
+
       - name: Tests under AddressSanitizer and UndefinedBehaviorSanitizer
-        run: make CXX=g++ STRICT=1 SANITIZE=1 test
+        run: make CXX=clang++ STRICT=1 SANITIZE=1 test
+
+  fuzz:
+    name: fuzz the parser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # libFuzzer ships with clang. This is the pass that actually earns its
+      # runtime: the parser's entire input is bytes chosen by whoever owns the
+      # page behind a pasted link, and every bug found in it so far was found
+      # here rather than by anyone writing a test case.
+      - name: Make sure clang's sanitizer runtime is present
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends clang libclang-rt-dev
+
+      - name: Fuzz for two minutes over the checked-in corpus
+        run: make CXX=clang++ fuzz FUZZ_TIME=120
+
+      - name: Keep any crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash
+          path: crash-*
+          if-no-files-found: ignore
 
   qml:
     name: qml syntax

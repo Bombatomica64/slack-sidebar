@@ -35,6 +35,7 @@ ColumnLayout {
     property bool editNotifyMentions: initial("notifyMentions", true)
     property bool editMarkReadOnOpen: initial("markReadOnOpen", true)
     property bool editLinkPreviews: initial("linkPreviews", true)
+    property bool editArchiveMessages: initial("archiveMessages", true)
 
     spacing: Style.marginM
 
@@ -215,6 +216,15 @@ ColumnLayout {
         onToggled: checked => root.editLinkPreviews = checked
     }
 
+    NToggle {
+        Layout.fillWidth: true
+        label: "Keep a local archive"
+        description: "Store every message seen in an encrypted database on this machine, so conversations open instantly, stay readable offline, and survive Slack hiding history past 90 days. Turning this off stops new messages being recorded; it does not delete what is already there."
+        checked: root.editArchiveMessages
+        defaultValue: root.defaults.archiveMessages
+        onToggled: checked => root.editArchiveMessages = checked
+    }
+
     NText {
         Layout.fillWidth: true
         text: root.credentialsStored ? "Credentials stored — use “Sign in with Slack” from the account chip in the sidebar." : "Add the Client ID and Secret above, save, then use “Sign in with Slack” from the account chip in the sidebar."
@@ -279,6 +289,7 @@ ColumnLayout {
         pluginApi.pluginSettings.notifyMentions = root.editNotifyMentions;
         pluginApi.pluginSettings.markReadOnOpen = root.editMarkReadOnOpen;
         pluginApi.pluginSettings.linkPreviews = root.editLinkPreviews;
+        pluginApi.pluginSettings.archiveMessages = root.editArchiveMessages;
         pluginApi.saveSettings();
     }
 }

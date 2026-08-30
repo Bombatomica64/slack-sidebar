@@ -10,6 +10,9 @@
 // gap `make coverage` exists to make visible.
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
@@ -23,6 +26,7 @@ import slack.util;
 import slack.net;
 import slack.api;
 import slack.store;
+import slack.archive;
 import slack.commands;
 
 namespace {
@@ -196,6 +200,128 @@ void test_cursors() {
               "cursor: an unknown channel has none");
 }
 
+// ------------------------------------------------------------------ archive
+
+// A key the tests own, so none of this needs a running secret service. The real
+// one is 32 random bytes from the keyring.
+const QString& testKey() {
+    static const QString key = slack::util::qs(
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    return key;
+}
+
+QString scratchDb(const char* name) {
+    const QString dir = QDir::tempPath() + slack::util::qs("/slack-archive-test");
+    QDir().mkpath(dir);
+    const QString path = dir + '/' + slack::util::qs(name) + slack::util::qs(".db");
+    QFile::remove(path);
+    QFile::remove(path + slack::util::qs("-wal"));
+    QFile::remove(path + slack::util::qs("-shm"));
+    return path;
+}
+
+QJsonObject message(const char* ts, const char* text, bool edited = false) {
+    const auto qs = slack::util::qs;
+    return QJsonObject{{"ts", qs(ts)},
+                       {"user", qs("UBOB")},
+                       {"author", qs("bob")},
+                       {"text", qs(text)},
+                       {"edited", edited},
+                       {"reactions", QJsonArray{}}};
+}
+
+void test_archive() {
+    using namespace slack::archive;
+    const auto qs = slack::util::qs;
+    const QString path = scratchDb("basic");
+
+    {
+        Db db(path, true, testKey());
+        expect(db.ok(), "archive: opens with an explicit key");
+
+        // A first page lands whole.
+        const IngestResult first = ingest(db, qs("C1"),
+                                          QJsonArray{message("1780000003.0001", "three"),
+                                                     message("1780000002.0001", "two"),
+                                                     message("1780000001.0001", "one")});
+        expect(first.added == 3 && first.revised == 0, "archive: a first page is all new");
+
+        // Re-fetching the same page must not duplicate or revise it.
+        const IngestResult again = ingest(db, qs("C1"),
+                                          QJsonArray{message("1780000003.0001", "three"),
+                                                     message("1780000002.0001", "two")});
+        expect(again.added == 0 && again.revised == 0 && again.unchanged == 2,
+               "archive: re-fetching the same messages changes nothing");
+
+        // Reactions churn on every poll and are not edits.
+        QJsonObject reacted = message("1780000002.0001", "two");
+        reacted[qs("reactions")] = QJsonArray{QJsonObject{{"name", qs("tada")}, {"count", 1}}};
+        const IngestResult churn = ingest(db, qs("C1"), QJsonArray{reacted});
+        expect(churn.revised == 0 && churn.unchanged == 1,
+               "archive: a new reaction is stored without making a revision");
+
+        // An actual edit is what a revision is for.
+        const IngestResult edit =
+            ingest(db, qs("C1"), QJsonArray{message("1780000002.0001", "two, corrected", true)});
+        expect(edit.revised == 1 && edit.added == 0, "archive: an edit makes a revision");
+
+        const QJsonArray history = readHistory(db, qs("C1"), 10, {});
+        expect(history.size() == 3, "archive: reads back every message once");
+        expect(slack::util::str(history.first().toObject(), "ts") == qs("1780000003.0001"),
+               "archive: newest first, the way history returns");
+        expect(slack::util::str(history.at(1).toObject(), "text") == qs("two, corrected"),
+               "archive: the current version is the edited one");
+
+        const QJsonArray revisions = readRevisions(db, qs("C1"), qs("1780000002.0001"));
+        expect(revisions.size() == 1, "archive: one superseded version kept");
+        expect(slack::util::str(revisions.first().toObject(), "text") == qs("two"),
+               "archive: and it is what the message used to say");
+
+        // Paging back, the same contract `history` has.
+        const QJsonArray older = readHistory(db, qs("C1"), 10, qs("1780000002.0001"));
+        expect(older.size() == 1 && slack::util::str(older.first().toObject(), "ts") == qs("1780000001.0001"),
+               "archive: before-ts pages backwards, exclusive");
+
+        expect(readHistory(db, qs("C-unknown"), 10, {}).isEmpty(),
+               "archive: an unknown conversation is empty, not an error");
+    }
+
+    // The whole point: none of that is readable on disk.
+    {
+        QFile file(path);
+        expect(file.open(QIODevice::ReadOnly), "archive: the file exists");
+        const QByteArray bytes = file.readAll();
+        expect(!bytes.contains("two, corrected"), "archive: message text is not on disk");
+        expect(!bytes.contains("bob"), "archive: author names are not on disk");
+        expect(!bytes.startsWith("SQLite format"), "archive: not even the SQLite header is on disk");
+    }
+
+    // A wrong key opens nothing.
+    {
+        Db wrong(path, false,
+                 qs("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"));
+        expect(!wrong.ok(), "archive: the wrong key does not open it");
+    }
+
+    // Reopening with the right key finds everything still there.
+    {
+        Db db(path, false, testKey());
+        expect(db.ok(), "archive: reopens with the right key");
+        expect(readHistory(db, qs("C1"), 10, {}).size() == 3, "archive: survives a reopen");
+        const QJsonObject counts = stats(db);
+        expect(counts.value(qs("messages")).toInt() == 3, "archive: stats count the messages");
+        expect(counts.value(qs("revisions")).toInt() == 1, "archive: stats count the revisions");
+    }
+
+    // Opening a database that does not exist, without permission to create it,
+    // is the "nothing archived yet" case and must not be an error.
+    {
+        Db absent(scratchDb("absent"), false, testKey());
+        expect(!absent.ok(), "archive: a missing database with createIfMissing off stays closed");
+        expect(readHistory(absent, qs("C1"), 10, {}).isEmpty(), "archive: and reads as empty");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -207,6 +333,7 @@ int main(int argc, char** argv) {
     test_util();
     test_form_encoding();
     test_cursors();
+    test_archive();
 
     if (g_failures == 0) {
         std::cout << g_checks << " checks passed\n";

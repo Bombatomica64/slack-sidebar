@@ -326,7 +326,7 @@ PluginComponent {
 
                             StyledText {
                                 width: parent.width
-                                text: modelData.userName || modelData.username || "Slack"
+                                text: modelData.author || slack.userMap[modelData.user]?.realName || slack.userMap[modelData.user]?.name || "unknown"
                                 color: modelData.mine ? Theme.primary : Theme.onSurface
                                 font.pixelSize: Theme.fontSizeSmall
                                 font.weight: Font.Bold

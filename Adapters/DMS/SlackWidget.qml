@@ -55,8 +55,8 @@ PluginComponent {
             mention: Theme.secondary,
             mentionSelf: Theme.primary,
             code: Theme.tertiary,
-            quote: Theme.onSurfaceVariant,
-            muted: Theme.onSurfaceVariant
+            quote: Theme.surfaceVariantText,
+            muted: Theme.surfaceVariantText
         })
         fixedFontFamily: "monospace"
         renderedEmojiSize: Theme.fontSizeLarge
@@ -68,7 +68,7 @@ PluginComponent {
 
             DankIcon {
                 name: "chat"
-                color: slack.mentionCount > 0 ? Theme.error : (slack.totalUnread > 0 ? Theme.primary : Theme.onSurfaceVariant)
+                color: slack.mentionCount > 0 ? Theme.error : (slack.totalUnread > 0 ? Theme.primary : Theme.surfaceVariantText)
                 size: Theme.iconSizeSmall
                 anchors.verticalCenter: parent.verticalCenter
             }
@@ -90,7 +90,7 @@ PluginComponent {
 
             DankIcon {
                 name: "chat"
-                color: slack.mentionCount > 0 ? Theme.error : (slack.totalUnread > 0 ? Theme.primary : Theme.onSurfaceVariant)
+                color: slack.mentionCount > 0 ? Theme.error : (slack.totalUnread > 0 ? Theme.primary : Theme.surfaceVariantText)
                 size: Theme.iconSizeSmall
                 anchors.horizontalCenter: parent.horizontalCenter
             }
@@ -140,7 +140,7 @@ PluginComponent {
                     StyledText {
                         width: parent.width
                         text: slack.agentBuilding ? "Building slack-agent…" : "Connect your Slack app"
-                        color: Theme.onSurface
+                        color: Theme.surfaceText
                         font.pixelSize: Theme.fontSizeLarge
                         font.weight: Font.Bold
                     }
@@ -148,7 +148,7 @@ PluginComponent {
                     StyledText {
                         width: parent.width
                         text: "Credentials go directly to Secret Service through libsecret and are never saved in DMS settings."
-                        color: Theme.onSurfaceVariant
+                        color: Theme.surfaceVariantText
                         font.pixelSize: Theme.fontSizeSmall
                         wrapMode: Text.WordWrap
                     }
@@ -180,13 +180,13 @@ PluginComponent {
                         Rectangle {
                             anchors.fill: parent
                             radius: parent.radius
-                            color: Theme.withAlpha(Theme.onPrimary, connectArea.containsMouse ? 0.12 : 0)
+                            color: Theme.withAlpha(Theme.primaryText, connectArea.containsMouse ? 0.12 : 0)
                         }
 
                         StyledText {
                             anchors.centerIn: parent
                             text: slack.haveClientId && slack.haveClientSecret ? "Sign in with Slack" : "Save credentials"
-                            color: Theme.onPrimary
+                            color: Theme.primaryText
                             font.pixelSize: Theme.fontSizeMedium
                             font.weight: Font.Bold
                         }
@@ -216,7 +216,7 @@ PluginComponent {
                         StyledText {
                             anchors.centerIn: parent
                             text: slack.signingIn ? "Waiting for Slack…" : "Sign in with stored credentials"
-                            color: Theme.onSurface
+                            color: Theme.surfaceText
                             font.pixelSize: Theme.fontSizeMedium
                         }
 
@@ -253,7 +253,7 @@ PluginComponent {
 
                             DankIcon {
                                 name: modelData.type === "im" ? "person" : "tag"
-                                color: modelData.mention ? Theme.error : (modelData.unread > 0 ? Theme.primary : Theme.onSurfaceVariant)
+                                color: modelData.mention ? Theme.error : (modelData.unread > 0 ? Theme.primary : Theme.surfaceVariantText)
                                 size: Theme.iconSizeSmall
                                 anchors.verticalCenter: parent.verticalCenter
                             }
@@ -265,7 +265,7 @@ PluginComponent {
                                 StyledText {
                                     width: parent.width
                                     text: modelData.name
-                                    color: Theme.onSurface
+                                    color: Theme.surfaceText
                                     font.pixelSize: Theme.fontSizeMedium
                                     font.weight: modelData.unread > 0 ? Font.Bold : Font.Normal
                                     elide: Text.ElideRight
@@ -274,7 +274,7 @@ PluginComponent {
                                 StyledText {
                                     width: parent.width
                                     text: modelData.latest?.text || modelData.topic || ""
-                                    color: Theme.onSurfaceVariant
+                                    color: Theme.surfaceVariantText
                                     font.pixelSize: Theme.fontSizeSmall
                                     elide: Text.ElideRight
                                 }
@@ -340,7 +340,7 @@ PluginComponent {
                             StyledText {
                                 width: parent.width
                                 text: modelData.author || slack.userMap[modelData.user]?.realName || slack.userMap[modelData.user]?.name || "unknown"
-                                color: modelData.mine ? Theme.primary : Theme.onSurface
+                                color: modelData.mine ? Theme.primary : Theme.surfaceText
                                 font.pixelSize: Theme.fontSizeSmall
                                 font.weight: Font.Bold
                             }
@@ -355,7 +355,7 @@ PluginComponent {
                                 // Noctalia's NText flips the same switch behind
                                 // its richTextEnabled flag.
                                 renderType: Text.QtRendering
-                                color: Theme.onSurface
+                                color: Theme.surfaceText
                                 font.pixelSize: Theme.fontSizeMedium
                                 wrapMode: Text.Wrap
                                 // StyledText elides by default, which truncates
@@ -393,13 +393,13 @@ PluginComponent {
                             Rectangle {
                                 anchors.fill: parent
                                 radius: parent.radius
-                                color: Theme.withAlpha(Theme.onPrimary, sendArea.containsMouse ? 0.12 : 0)
+                                color: Theme.withAlpha(Theme.primaryText, sendArea.containsMouse ? 0.12 : 0)
                             }
 
                             DankIcon {
                                 anchors.centerIn: parent
                                 name: "send"
-                                color: Theme.onPrimary
+                                color: Theme.primaryText
                                 size: Theme.iconSizeSmall
                             }
 

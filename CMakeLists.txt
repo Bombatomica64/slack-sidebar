@@ -215,8 +215,32 @@ endif()
 target_compile_options(slack_flags INTERFACE
   -fstack-protector-strong -fno-delete-null-pointer-checks)
 target_compile_definitions(slack_flags INTERFACE
-  _GLIBCXX_ASSERTIONS _FORTIFY_SOURCE=2
+  _GLIBCXX_ASSERTIONS
   QT_NO_KEYWORDS QT_DISABLE_DEPRECATED_UP_TO=0x060400)
+
+# glibc 2.41's clang fortify path renames the fortified wrappers with asm
+# labels (memmove.inline, …) and relies on them always inlining. Inside a C++20
+# module's global module fragment clang never emits those bodies, so every
+# importer links against undefined "*.inline" symbols. Skip fortify on that
+# combination; everyone else keeps it.
+include(CheckCXXSourceCompiles)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set(CMAKE_REQUIRED_DEFINITIONS -D_FORTIFY_SOURCE=2)
+  set(CMAKE_REQUIRED_FLAGS -O2)
+  check_cxx_source_compiles("
+    #include <string.h>
+    #if defined(__GLIBC__) && (__GLIBC__ > 2 || __GLIBC_MINOR__ >= 41)
+    #error glibc clang-fortify uses .inline asm labels
+    #endif
+    int main() { return 0; }" SLACK_FORTIFY_SAFE)
+  unset(CMAKE_REQUIRED_DEFINITIONS)
+  unset(CMAKE_REQUIRED_FLAGS)
+else()
+  set(SLACK_FORTIFY_SAFE TRUE)
+endif()
+if(SLACK_FORTIFY_SAFE)
+  target_compile_definitions(slack_flags INTERFACE _FORTIFY_SOURCE=2)
+endif()
 
 # -pthread on every target, not only the Qt-facing ones, and spelled out rather
 # than left to Threads::Threads: on glibc that target contributes no compile

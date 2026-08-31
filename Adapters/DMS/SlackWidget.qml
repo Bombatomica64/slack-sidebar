@@ -349,9 +349,18 @@ PluginComponent {
                                 width: parent.width
                                 text: modelData.html || modelData.text || ""
                                 textFormat: Text.RichText
+                                // StyledText renders natively, and native
+                                // rendering leaves a rich text document on its
+                                // own default colour - black on a dark popout.
+                                // Noctalia's NText flips the same switch behind
+                                // its richTextEnabled flag.
+                                renderType: Text.QtRendering
                                 color: Theme.onSurface
                                 font.pixelSize: Theme.fontSizeMedium
                                 wrapMode: Text.Wrap
+                                // StyledText elides by default, which truncates
+                                // a wrapped message instead of growing.
+                                elide: Text.ElideNone
                                 onLinkActivated: link => Qt.openUrlExternally(link)
                             }
                         }

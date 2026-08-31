@@ -380,14 +380,23 @@ Item {
         return (override && override !== "" ? override : Quickshell.env("HOME") + "/.cache") + "/noctalia-slack";
     }
 
+    // A release tarball ships the agent inside the plugin directory, so there is
+    // a working binary before anything has been built. A clone has no bin/ and
+    // falls through to the one the plugin builds for itself.
+    function bundledAgent() {
+        return pluginDir() + "/bin/slack-agent";
+    }
+
     function agent() {
-        return cacheDir() + "/bin/slack-agent";
+        return root.agentBundled ? bundledAgent() : cacheDir() + "/bin/slack-agent";
     }
 
     // Set once the agent has answered a call. Nothing else runs until it has:
     // a missing binary would otherwise look like a hundred separate failures.
     property bool agentReady: false
     property bool agentBuilding: false
+    // True once the copy shipped in the plugin directory has answered a call.
+    property bool agentBundled: false
 
     // Slack has rejected the credentials and renewing them is not possible, so
     // reopen the sign-in instead of leaving a dead sidebar with a red line.
@@ -828,10 +837,11 @@ Item {
 
     // ------------------------------------------------------------- bootstrap
 
-    // The agent builds itself on first use, through the Makefile shim over
-    // CMake. Configuring and building are both no-ops once the binary is
-    // current, so probing and building is cheap enough to do at every start and
-    // self-healing when the plugin is updated.
+    // Three ways to end up with a working agent, tried in that order: the one a
+    // release tarball ships in the plugin directory, the one a previous run
+    // built into the cache, and building it now. Configuring and building are
+    // both no-ops once the binary is current, so probing and building is cheap
+    // enough to do at every start and self-healing when the plugin is updated.
     function _startup() {
         root.agentReady = true;
         refreshIdentity();
@@ -849,13 +859,29 @@ Item {
         buildProc.running = true;
     }
 
-    Component.onCompleted: probeProc.running = true
+    Component.onCompleted: bundledProbeProc.running = true
 
-    // Any subcommand that needs neither a token nor the network will do; this
-    // one only reads the keyring.
+    // Any subcommand that needs neither a token nor the network will do; these
+    // only read the keyring. A missing binary exits non-zero, which is the whole
+    // test: no file existence check, just ask it something.
+    Process {
+        id: bundledProbeProc
+        command: [root.bundledAgent(), "credentials"]
+        stdout: StdioCollector {}
+        stderr: StdioCollector {}
+        onExited: (code, status) => {
+            if (code === 0) {
+                root.agentBundled = true;
+                root._startup();
+            } else {
+                probeProc.running = true;
+            }
+        }
+    }
+
     Process {
         id: probeProc
-        command: [root.agent(), "credentials"]
+        command: [root.cacheDir() + "/bin/slack-agent", "credentials"]
         stdout: StdioCollector {}
         stderr: StdioCollector {}
         onExited: (code, status) => {

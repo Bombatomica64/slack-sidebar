@@ -11,8 +11,26 @@ the bottom.
 
 Requires **noctalia-shell 4.x** (developed against 4.7.7).
 
-All Slack access goes through `slack-agent`, a compiled binary the plugin builds
-for itself on first run, so the machine needs a toolchain:
+All Slack access goes through `slack-agent`, a compiled binary. Either take one
+that is already built, or build it.
+
+### From a release (nothing to build)
+
+Each release ships the whole plugin with the helper already inside it. The
+archive's top directory is `slack`, which is the name the plugin must have, so
+extracting it is the entire install:
+
+```sh
+tar -xzf slack-plugin-x86_64-linux-gnu.tar.gz -C ~/.config/noctalia/plugins
+```
+
+Check it against the published `.sha256` first if you like. Optional at runtime:
+`wl-copy` for the copy action, `notify-send` for notifications, `xdg-open` to
+open links and the sign-in page.
+
+### From a clone (builds on first run)
+
+The machine needs a toolchain:
 
 | | |
 | --- | --- |
@@ -23,21 +41,24 @@ for itself on first run, so the machine needs a toolchain:
 **clang 17 or newer**, and **CMake 3.28+ with Ninja**, which is the floor for
 building C++20 modules. gcc cannot build this — see
 [Modules](#modules-and-the-compiler-floor-they-cost) for the details.
-Optional at runtime: `wl-copy` for the copy action, `notify-send` for
-notifications, `xdg-open` to open links and the sign-in page.
 
 ```sh
 git clone https://github.com/Bombatomica64/slack-sidebar.git ~/.config/noctalia/plugins/slack
 ```
 
-Then enable **Slack** in Noctalia's Settings → Plugins, and add its widget to the
-bar. The directory name must be `slack`, matching the `id` in `manifest.json`.
-
 The first time the plugin starts it runs `make install` for you, into
 `~/.cache/noctalia-slack/bin/`, and says so in the header while it does. If that
 fails the header explains what is missing; `make` in the plugin directory shows
-the real error. If you would rather not build anything, each release also ships
-a prebuilt `slack-agent` — drop it in that directory.
+the real error. Each release also ships the bare `slack-agent` binary on its own,
+for a clone on a machine whose compiler is too old — drop it in that directory.
+
+Either way: enable **Slack** in Noctalia's Settings → Plugins, and add its widget
+to the bar. The directory name must be `slack`, matching the `id` in
+`manifest.json`.
+
+At startup the plugin looks for the helper in `bin/slack-agent` inside the plugin
+directory first (where the tarball puts it), then in the cache directory, and
+builds it only if neither answers.
 
 While hacking on it, turn on the per-plugin hot reload (the bug icon on the
 plugin card) — it only appears when the shell runs with `NOCTALIA_DEBUG=1`.

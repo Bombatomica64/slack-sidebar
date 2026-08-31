@@ -64,8 +64,29 @@ jobs:
           sha256sum "$name" > "$name.sha256"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
-      # The plugin builds this itself on first run; the artifact is the escape
-      # hatch for a machine whose compiler is too old for C++20 modules.
+      # The whole plugin with the helper already built, for people who would
+      # rather not install a C++26 toolchain to read Slack. The archive's top
+      # directory is `slack` because the plugin id in manifest.json has to match
+      # the directory name, so extracting it into the plugins directory is the
+      # entire install.
+      - name: Package the plugin with the helper inside it
+        id: bundle
+        run: |
+          name="slack-plugin-$(uname -m)-linux-gnu"
+          mkdir -p "pkg/slack/bin"
+          cp manifest.json LICENSE README.md pkg/slack/
+          cp ./*.qml pkg/slack/
+          cp -r Components pkg/slack/
+          cp build/slack-agent pkg/slack/bin/slack-agent
+          chmod 0755 pkg/slack/bin/slack-agent
+          tar -C pkg -czf "$name.tar.gz" slack
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          tar -tzf "$name.tar.gz"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # Three ways in, in the order the README offers them: the tarball for
+      # people who want none of this, the bare binary for a clone on a machine
+      # whose compiler is too old for C++20 modules, and building it yourself.
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,6 +95,8 @@ jobs:
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --title "$tag" --generate-notes
           gh release upload "$tag" \
+            "${{ steps.bundle.outputs.name }}.tar.gz" \
+            "${{ steps.bundle.outputs.name }}.tar.gz.sha256" \
             "${{ steps.artifact.outputs.name }}" \
             "${{ steps.artifact.outputs.name }}.sha256" \
             --clobber

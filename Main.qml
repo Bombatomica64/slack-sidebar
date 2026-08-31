@@ -805,9 +805,10 @@ Item {
 
     // ------------------------------------------------------------- bootstrap
 
-    // The agent builds itself on first use. `make` is a no-op once the binary
-    // is current, so probing and building is cheap enough to do at every start
-    // and self-healing when the plugin is updated.
+    // The agent builds itself on first use, through the Makefile shim over
+    // CMake. Configuring and building are both no-ops once the binary is
+    // current, so probing and building is cheap enough to do at every start and
+    // self-healing when the plugin is updated.
     function _startup() {
         root.agentReady = true;
         refreshIdentity();
@@ -857,7 +858,7 @@ Item {
             }
             // Naming the two things that actually go wrong beats a build log in
             // a sidebar subtitle.
-            root.lastError = "Could not build the Slack helper. It needs make, Qt 6 development headers, libsecret and OpenSSL, and a compiler new enough for C++20 modules (clang 17+ or gcc 14+). Run `make` in " + root.pluginDir() + " to see why.";
+            root.lastError = "Could not build the Slack helper. It needs make, CMake 3.28+ with Ninja, Qt 6 development headers, libsecret, OpenSSL and SQLCipher, and clang 17+ for C++20 modules. Run `make` in " + root.pluginDir() + " to see why.";
             Logger.e("Slack", "helper build failed: " + root._buildLog.slice(-2000));
         }
     }

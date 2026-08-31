@@ -877,11 +877,13 @@ Item {
     Component.onCompleted: bundledProbeProc.running = true
 
     // Any subcommand that needs neither a token nor the network will do; these
-    // only read the keyring. A missing binary exits non-zero, which is the whole
-    // test: no file existence check, just ask it something.
+    // only read the keyring. Spawned through sh rather than directly, because a
+    // binary that does not exist yet never starts, and a process that never
+    // starts never emits exited - which stalled the whole chain on exactly the
+    // first run the chain exists for. sh always starts and reports 127.
     Process {
         id: bundledProbeProc
-        command: [root.bundledAgent(), "credentials"]
+        command: ["sh", "-c", 'exec "$0" credentials', root.bundledAgent()]
         stdout: StdioCollector {}
         stderr: StdioCollector {}
         onExited: (code, status) => {
@@ -896,7 +898,7 @@ Item {
 
     Process {
         id: probeProc
-        command: [root.cacheDir() + "/bin/slack-agent", "credentials"]
+        command: ["sh", "-c", 'exec "$0" credentials', root.cacheDir() + "/bin/slack-agent"]
         stdout: StdioCollector {}
         stderr: StdioCollector {}
         onExited: (code, status) => {

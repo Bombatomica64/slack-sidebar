@@ -43,9 +43,11 @@ Item {
     readonly property string identityUserId: setting("identityUserId", "")
     // auto | user | bot — which stored token to authenticate as.
     readonly property string tokenPreference: setting("tokenPreference", "auto")
-    // Must match a Redirect URL registered on the Slack app, and must be a
-    // loopback address so the plugin can answer the callback itself.
-    readonly property string redirectUri: setting("redirectUri", "https://localhost:3000")
+    // Not a setting. The agent can only answer the callback on loopback, this
+    // is the value the README tells you to register under OAuth & Permissions,
+    // and a field whose only correct value is the default is a field whose only
+    // use is getting the sign-in wrong.
+    readonly property string redirectUri: "https://localhost:3000"
     readonly property string sidePref: setting("side", "right")
     readonly property int panelWidthPref: setting("panelWidth", 460)
 

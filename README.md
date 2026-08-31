@@ -56,8 +56,10 @@ Signing in happens in the plugin — there is no code to copy anywhere:
 1. Slack app → **Basic Information → App Credentials**: put the **Client ID** and
    **Client Secret** into the plugin settings and save. They go to the keyring,
    never to `settings.json`.
-2. Slack app → **OAuth & Permissions → Redirect URLs**: register the plugin's
-   **Redirect URL** (default `https://localhost:3000`) and Save.
+2. Slack app → **OAuth & Permissions → Redirect URLs**: register
+   `https://localhost:3000`, exactly, and Save. It is not configurable — the
+   agent can only answer the callback on loopback, and a value that has to
+   match on both sides is not worth a text field to get wrong.
 3. Sidebar → click the account chip → **Sign in with Slack**.
 
 `slack-agent signin` then serves that redirect on loopback, opens the browser, and

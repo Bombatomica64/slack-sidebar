@@ -15,7 +15,17 @@ permissions:
 jobs:
   publish:
     name: publish helper binary
-    runs-on: ubuntu-latest
+    # Pinned, and not for reproducibility: this line is the glibc floor of every
+    # binary in the release. glibc is backward compatible through symbol
+    # versioning, so what is built here runs on anything newer and on nothing
+    # older - 24.04 means glibc 2.39, which covers Debian 13 (2.41), Arch,
+    # Ubuntu 24.04+ and Fedora 40+, and misses Debian 12 (2.36).
+    #
+    # ubuntu-latest would move that floor on GitHub's schedule rather than on
+    # ours: the day it rolls to the next LTS, the tarball silently stops running
+    # on distros it ran on yesterday, with nothing in this repo having changed.
+    # Raising it should be a commit someone writes on purpose.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:

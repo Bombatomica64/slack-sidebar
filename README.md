@@ -28,6 +28,10 @@ Check it against the published `.sha256` first if you like. Optional at runtime:
 `wl-copy` for the copy action, `notify-send` for notifications, `xdg-open` to
 open links and the sign-in page.
 
+The published binaries are built against **glibc 2.39**, so they run on Debian 13
+and newer, Arch, Ubuntu 24.04 and newer, and Fedora 40 and newer. Anything older
+— Debian 12, for one — has to build from a clone, which has no such floor.
+
 ### From a clone (builds on first run)
 
 The machine needs a toolchain:

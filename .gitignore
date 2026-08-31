@@ -10,8 +10,10 @@ settings.json
 *~
 
 # Native build output. The helper normally builds into the cache dir, but
-# `make` on its own puts it here.
+# `make` on its own puts it here. bin/ is where a release tarball carries the
+# prebuilt helper, and where someone may drop one by hand.
 build/
+bin/
 *.o
 
 # Byte-compiled Python from py_compile runs

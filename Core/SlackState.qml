@@ -58,9 +58,11 @@ Item {
     readonly property string identityUserId: setting("identityUserId", "")
     // auto | user | bot — which stored token to authenticate as.
     readonly property string tokenPreference: setting("tokenPreference", "auto")
-    // Must match a Redirect URL registered on the Slack app, and must be a
-    // loopback address so the plugin can answer the callback itself.
-    readonly property string redirectUri: setting("redirectUri", "https://localhost:3000")
+    // Not a setting. The agent can only answer the callback on loopback, this
+    // is the value the README tells you to register under OAuth & Permissions,
+    // and a field whose only correct value is the default is a field whose only
+    // use is getting the sign-in wrong.
+    readonly property string redirectUri: "https://localhost:3000"
     readonly property string sidePref: setting("side", "right")
     readonly property int panelWidthPref: setting("panelWidth", 460)
 
@@ -76,6 +78,7 @@ Item {
     property string userTokenHint: ""
     property bool signingIn: false
     property real _lastSignInPrompt: 0
+    property real _lastIdentityProbe: 0
     property bool haveClientId: false
     property bool haveClientSecret: false
     property bool haveRefreshToken: false
@@ -184,6 +187,9 @@ Item {
     }
     property var pollState: ({})            // id -> {unread, mention, latest, cursor}
     property bool listLoading: false
+    // True through the whole startup window - before the agent has answered at
+    // all, as well as while the list itself is in flight.
+    readonly property bool conversationsPending: !agentReady || listLoading
     property bool polling: false
 
     property string activeId: ""
@@ -391,13 +397,22 @@ Item {
         return (override && override !== "" ? override : Quickshell.env("HOME") + "/.cache") + "/slack-sidebar";
     }
 
+    // A release tarball ships the agent inside the plugin directory, so there is
+    // a working binary before anything has been built. A clone has no bin/ and
+    // falls through to the one the plugin builds for itself.
+    function bundledAgent() {
+        return pluginDir() + "/bin/slack-agent";
+    }
+
     function agent() {
-        return cacheDir() + "/bin/slack-agent";
+        return root.agentBundled ? bundledAgent() : cacheDir() + "/bin/slack-agent";
     }
 
     // Set once the agent has answered a call. Nothing else runs until it has:
     // a missing binary would otherwise look like a hundred separate failures.
     property bool agentReady: false
+    // True once the copy shipped in the plugin directory has answered a call.
+    property bool agentBundled: false
     property bool agentBuilding: false
 
     // Slack has rejected the credentials and renewing them is not possible, so
@@ -427,11 +442,31 @@ Item {
         }
         try {
             const res = JSON.parse(raw);
-            if (res.needsSignIn === true)
+            // `me` is the only call that sets connected, so the header used to
+            // hold whatever it said last: a session that died stayed green
+            // until something re-ran it, and a session repaired out of band -
+            // by signing in from a terminal, say - stayed red while every
+            // message loaded fine. A call Slack refuses proves the first; a
+            // call Slack answers while we believe we are disconnected is worth
+            // re-asking `me` about, which is the only thing that can also fill
+            // in who we are now.
+            if (res.needsSignIn === true) {
+                root.connected = false;
                 Qt.callLater(root._sessionExpired);
+            }
             if (res.ok !== true) {
                 root.lastError = res.error || (context + " failed");
                 return res;
+            }
+            // Not for `me`'s own reply, which is about to set connected itself,
+            // and not more than twice a minute: while the session really is
+            // dead, the calls that need no token still answer ok.
+            if (!root.connected && context !== "auth") {
+                const now = Date.now();
+                if (now - root._lastIdentityProbe > 30000) {
+                    root._lastIdentityProbe = now;
+                    Qt.callLater(root.refreshIdentity);
+                }
             }
             root.lastError = "";
             return res;
@@ -817,9 +852,11 @@ Item {
 
     // ------------------------------------------------------------- bootstrap
 
-    // The agent builds itself on first use. `make` is a no-op once the binary
-    // is current, so probing and building is cheap enough to do at every start
-    // and self-healing when the plugin is updated.
+    // Three ways to end up with a working agent, tried in that order: the one a
+    // release tarball ships in the plugin directory, the one a previous run
+    // built into the cache, and building it now. Configuring and building are
+    // both no-ops once the binary is current, so probing and building is cheap
+    // enough to do at every start and self-healing when the plugin is updated.
     function _startup() {
         root.agentReady = true;
         refreshIdentity();
@@ -833,18 +870,33 @@ Item {
         if (root.agentBuilding)
             return;
         root.agentBuilding = true;
-        root.lastError = "Building the Slack helper…";
         buildProc.command = ["make", "-C", root.pluginDir(), "--no-print-directory", "PREFIX=" + root.cacheDir(), "BUILDDIR=" + root.cacheDir() + "/build", "install"];
         buildProc.running = true;
     }
 
-    Component.onCompleted: probeProc.running = true
+    Component.onCompleted: bundledProbeProc.running = true
 
-    // Any subcommand that needs neither a token nor the network will do; this
-    // one only reads the keyring.
+    // Any subcommand that needs neither a token nor the network will do; these
+    // only read the keyring. A missing binary exits non-zero, which is the whole
+    // test: no file existence check, just ask it something.
+    Process {
+        id: bundledProbeProc
+        command: [root.bundledAgent(), "credentials"]
+        stdout: StdioCollector {}
+        stderr: StdioCollector {}
+        onExited: (code, status) => {
+            if (code === 0) {
+                root.agentBundled = true;
+                root._startup();
+            } else {
+                probeProc.running = true;
+            }
+        }
+    }
+
     Process {
         id: probeProc
-        command: [root.agent(), "credentials"]
+        command: [root.cacheDir() + "/bin/slack-agent", "credentials"]
         stdout: StdioCollector {}
         stderr: StdioCollector {}
         onExited: (code, status) => {
@@ -870,7 +922,7 @@ Item {
             }
             // Naming the two things that actually go wrong beats a build log in
             // a sidebar subtitle.
-            root.lastError = "Could not build the Slack helper. It needs make, Qt 6 development headers, libsecret and OpenSSL, and a compiler new enough for C++20 modules (clang 17+ or gcc 14+). Run `make` in " + root.pluginDir() + " to see why.";
+            root.lastError = "Could not build the Slack helper. It needs make, CMake 3.28+ with Ninja, Qt 6 development headers, libsecret, OpenSSL and SQLCipher, and clang 17+ for C++20 modules. Run `make` in " + root.pluginDir() + " to see why.";
             console.error("Slack: helper build failed: " + root._buildLog.slice(-2000));
         }
     }
@@ -900,6 +952,17 @@ Item {
     }
 
     readonly property bool panelVisible: platformAdapter?.panelVisible ?? true
+
+    // The settings pane stores the Client ID and Secret with its own process, in
+    // a component tree that has no handle on this one, so nothing here learns
+    // that they arrived. Without this the sign-in entry stays greyed out for the
+    // rest of the session in which they were entered - which is exactly the
+    // session someone enters them in. A keyring read on panel open is cheap, and
+    // opening the sidebar is what you do next to click the thing.
+    onPanelVisibleChanged: {
+        if (root.panelVisible)
+            root.refreshCredentials();
+    }
 
     Timer {
         // Only while the sidebar is on screen — otherwise a conversation left

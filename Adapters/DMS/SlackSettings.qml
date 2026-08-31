@@ -23,14 +23,6 @@ PluginSettings {
         wrapMode: Text.WordWrap
     }
 
-    StringSetting {
-        settingKey: "redirectUri"
-        label: "OAuth redirect URL"
-        description: "Must exactly match the loopback redirect registered in the Slack app"
-        placeholder: "https://localhost:3000"
-        defaultValue: "https://localhost:3000"
-    }
-
     SelectionSetting {
         settingKey: "tokenPreference"
         label: "Act as"

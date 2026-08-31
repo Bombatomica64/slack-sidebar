@@ -25,8 +25,7 @@ PluginComponent {
         archiveMessages: true,
         pinned: [],
         identityUserId: "",
-        tokenPreference: "auto",
-        redirectUri: "https://localhost:3000"
+        tokenPreference: "auto"
     })
 
     Core.SlackState {

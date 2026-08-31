@@ -15,7 +15,17 @@ permissions:
 jobs:
   publish:
     name: publish helper binary
-    runs-on: ubuntu-latest
+    # Pinned, and not for reproducibility: this line is the glibc floor of every
+    # binary in the release. glibc is backward compatible through symbol
+    # versioning, so what is built here runs on anything newer and on nothing
+    # older - 24.04 means glibc 2.39, which covers Debian 13 (2.41), Arch,
+    # Ubuntu 24.04+ and Fedora 40+, and misses Debian 12 (2.36).
+    #
+    # ubuntu-latest would move that floor on GitHub's schedule rather than on
+    # ours: the day it rolls to the next LTS, the tarball silently stops running
+    # on distros it ran on yesterday, with nothing in this repo having changed.
+    # Raising it should be a commit someone writes on purpose.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,7 +44,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            clang qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
+            clang cmake ninja-build \
+            qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
 
       - name: Build
         run: make CXX=clang++ STRICT=1 PORTABLE=1 all
@@ -45,7 +56,10 @@ jobs:
           # runtime dependencies the user's distro provides. libstdc++ is not:
           # it is statically linked so the binary loads on older distros too.
           ldd build/slack-agent || true
-          if ldd build/slack-agent | grep -qE 'libstdc\+\+|libgcc_s'; then
+          # readelf, not ldd: ldd walks the whole transitive closure, and Qt
+          # itself links libstdc++, so an ldd grep measures the C++ runtime of
+          # whoever built Qt rather than this binary's own linkage.
+          if readelf -d build/slack-agent | grep -qE 'NEEDED.*(libstdc\+\+|libgcc_s)'; then
             echo "binary still links libstdc++/libgcc dynamically" >&2
             exit 1
           fi
@@ -60,8 +74,29 @@ jobs:
           sha256sum "$name" > "$name.sha256"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
-      # The plugin builds this itself on first run; the artifact is the escape
-      # hatch for a machine whose compiler is too old for C++20 modules.
+      # The whole plugin with the helper already built, for people who would
+      # rather not install a C++26 toolchain to read Slack. The archive's top
+      # directory is `slack` because the plugin id in manifest.json has to match
+      # the directory name, so extracting it into the plugins directory is the
+      # entire install.
+      - name: Package the plugin with the helper inside it
+        id: bundle
+        run: |
+          name="slack-plugin-$(uname -m)-linux-gnu"
+          mkdir -p "pkg/slack/bin"
+          cp manifest.json LICENSE README.md pkg/slack/
+          cp ./*.qml pkg/slack/
+          cp -r Components pkg/slack/
+          cp build/slack-agent pkg/slack/bin/slack-agent
+          chmod 0755 pkg/slack/bin/slack-agent
+          tar -C pkg -czf "$name.tar.gz" slack
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          tar -tzf "$name.tar.gz"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # Three ways in, in the order the README offers them: the tarball for
+      # people who want none of this, the bare binary for a clone on a machine
+      # whose compiler is too old for C++20 modules, and building it yourself.
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,6 +105,8 @@ jobs:
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --title "$tag" --generate-notes
           gh release upload "$tag" \
+            "${{ steps.bundle.outputs.name }}.tar.gz" \
+            "${{ steps.bundle.outputs.name }}.tar.gz.sha256" \
             "${{ steps.artifact.outputs.name }}" \
             "${{ steps.artifact.outputs.name }}.sha256" \
             --clobber

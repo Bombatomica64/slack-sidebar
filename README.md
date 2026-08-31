@@ -29,32 +29,58 @@ code belongs under `Adapters/`.
 
 Requires **noctalia-shell 4.x** (developed against 4.7.7).
 
-All Slack access goes through `slack-agent`, a compiled binary the plugin builds
-for itself on first run, so the machine needs a toolchain:
+All Slack access goes through `slack-agent`, a compiled binary. Either take one
+that is already built, or build it.
+
+### From a release (nothing to build)
+
+Each release ships the whole plugin with the helper already inside it. The
+archive's top directory is `slack`, which is the name the plugin must have, so
+extracting it is the entire install:
+
+```sh
+tar -xzf slack-plugin-x86_64-linux-gnu.tar.gz -C ~/.config/noctalia/plugins
+```
+
+Check it against the published `.sha256` first if you like. Optional at runtime:
+`wl-copy` for the copy action, `notify-send` for notifications, `xdg-open` to
+open links and the sign-in page.
+
+The published binaries are built against **glibc 2.39**, so they run on Debian 13
+and newer, Arch, Ubuntu 24.04 and newer, and Fedora 40 and newer. Anything older
+— Debian 12, for one — has to build from a clone, which has no such floor.
+
+### From a clone (builds on first run)
+
+The machine needs a toolchain:
 
 | | |
 | --- | --- |
-| Debian / Ubuntu | `apt install make clang qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev` |
-| Arch | `pacman -S make clang qt6-base libsecret openssl sqlcipher` |
-| Fedora | `dnf install make clang qt6-qtbase-devel libsecret-devel openssl-devel sqlcipher-devel` |
+| Debian / Ubuntu | `apt install make cmake ninja-build clang qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev` |
+| Arch | `pacman -S make cmake ninja clang qt6-base libsecret openssl sqlcipher` |
+| Fedora | `dnf install make cmake ninja-build clang qt6-qtbase-devel libsecret-devel openssl-devel sqlcipher-devel` |
 
-**clang 17 or newer.** gcc cannot build this — see
+**clang 17 or newer**, and **CMake 3.28+ with Ninja**, which is the floor for
+building C++20 modules. gcc cannot build this — see
 [Modules](#modules-and-the-compiler-floor-they-cost) for the details.
-Optional at runtime: `wl-copy` for the copy action, `notify-send` for
-notifications, `xdg-open` to open links and the sign-in page.
 
 ```sh
 git clone https://github.com/Bombatomica64/slack-sidebar.git ~/.config/noctalia/plugins/slack
 ```
 
-Then enable **Slack** in Noctalia's Settings → Plugins, and add its widget to the
-bar. The directory name must be `slack`, matching the `id` in `manifest.json`.
-
 The first time the plugin starts it runs `make install` for you, into
 `~/.cache/slack-sidebar/bin/`, and says so in the header while it does. If that
 fails the header explains what is missing; `make` in the plugin directory shows
-the real error. If you would rather not build anything, each release also ships
-a prebuilt `slack-agent` — drop it in that directory.
+the real error. Each release also ships the bare `slack-agent` binary on its own,
+for a clone on a machine whose compiler is too old — drop it in that directory.
+
+Either way: enable **Slack** in Noctalia's Settings → Plugins, and add its widget
+to the bar. The directory name must be `slack`, matching the `id` in
+`manifest.json`.
+
+At startup the plugin looks for the helper in `bin/slack-agent` inside the plugin
+directory first (where the tarball puts it), then in the cache directory, and
+builds it only if neither answers.
 
 While hacking on it, turn on the per-plugin hot reload (the bug icon on the
 plugin card) — it only appears when the shell runs with `NOCTALIA_DEBUG=1`.
@@ -73,8 +99,10 @@ Signing in happens in the plugin — there is no code to copy anywhere:
 1. Slack app → **Basic Information → App Credentials**: put the **Client ID** and
    **Client Secret** into the plugin settings and save. They go to the keyring,
    never to `settings.json`.
-2. Slack app → **OAuth & Permissions → Redirect URLs**: register the plugin's
-   **Redirect URL** (default `https://localhost:3000`) and Save.
+2. Slack app → **OAuth & Permissions → Redirect URLs**: register
+   `https://localhost:3000`, exactly, and Save. It is not configurable — the
+   agent can only answer the callback on loopback, and a value that has to
+   match on both sides is not worth a text field to get wrong.
 3. Sidebar → click the account chip → **Sign in with Slack**.
 
 `slack-agent signin` then serves that redirect on loopback, opens the browser, and
@@ -323,17 +351,50 @@ make install         # install the agent where the plugin looks for it
 make print-config    # which compiler, standard and version were chosen
 ```
 
-Plain GNU make, no CMake: the native side is three translation units, and a
-generator that writes a build system to build three files is machinery nobody
-wants to review.
+The build system of record is `CMakeLists.txt`; the `Makefile` is a thin shim
+over it, kept because the plugin builds its own helper on first run with a
+single command. CMake directly, if you prefer:
 
-| Knob | Effect |
-| --- | --- |
-| `CXX=g++-14` | pick a compiler (default: `clang++` if installed) |
-| `OPT=-O0` | optimisation level (use this, not `CXXFLAGS=`, which would drop `-std`) |
-| `STRICT=1` | `-Werror` |
-| `SANITIZE=1` | AddressSanitizer + UndefinedBehaviorSanitizer (clang only, see below) |
-| `PORTABLE=1` | static libstdc++/libgcc, for release artifacts |
+```sh
+cmake -S . -B build -G Ninja -DSLACK_STRICT=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+cmake --build build --target install
+```
+
+Ninja is not optional and the configure step says so: module builds need
+dependency scanning, and only the Ninja generator can express the dynamic
+dependencies that produces.
+
+| Knob | CMake option | Effect |
+| --- | --- | --- |
+| `CXX=g++-14` | `CMAKE_CXX_COMPILER` | pick a compiler (default: `clang++` if installed) |
+| `OPT=-O0` | `CMAKE_CXX_FLAGS` | optimisation level |
+| `BUILD_TYPE=Debug` | `CMAKE_BUILD_TYPE` | default `RelWithDebInfo` — `-O2` with debug info |
+| `STRICT=1` | `SLACK_STRICT` | `-Werror` |
+| `SANITIZE=1` | `SLACK_SANITIZE` | AddressSanitizer + UndefinedBehaviorSanitizer (clang only, see below) |
+| `PORTABLE=1` | `SLACK_PORTABLE` | static libstdc++/libgcc, for release artifacts |
+| `ALLOW_GCC=1` | `SLACK_ALLOW_GCC` | lift the clang-only gate and try gcc anyway |
+
+### Why CMake, for nine files
+
+The earlier build was a hand-written Makefile, on the reasoning that a generator
+writing a build system for a handful of translation units is machinery nobody
+wants to review. Two things about modules made that wrong.
+
+A binary module interface records the configuration it was compiled under, and a
+consumer compiled under a different one is rejected — not with a flag mismatch
+warning but with `POSIX thread support was disabled in precompiled file`,
+followed by every name in the module failing to resolve. The Makefile's `.pcm`
+rules depended on their sources and nothing else, so a `.pcm` left over from a
+build with different flags was silently reused, and the error pointed at the
+importer rather than at the stale file. CMake tracks what each BMI was built
+with and rebuilds it when that changes.
+
+The second is the import graph. The Makefile listed it by hand — eight
+dependency lines that were a copy of the truth, maintained by hand, and wrong
+the moment an `import` was added. CMake runs `clang-scan-deps` over the sources
+and orders the build from what is actually written in them.
 
 ### Modules, and the compiler floor they cost
 
@@ -373,7 +434,7 @@ ever wanted, is to keep Qt out of module interface units entirely — which mean
 the Qt-facing code stops being modules and goes back to headers and sources,
 leaving `html.cppm` (which touches no Qt, and conforms) as the only module. CI keeps asking
 anyway: the non-blocking `gcc-modules-probe` job builds in the official
-`gcc:latest` container with `ALLOW_GCC=1` (which lifts the Makefile's gate) and
+`gcc:latest` container with `ALLOW_GCC=1` (which lifts the build's gate) and
 writes the verdict, with the version it actually got, into the run summary. It
 tracks `latest` rather than a pinned major precisely so it cannot go quietly
 stale — the first version of this job was pinned to 15 and was already a release
@@ -534,7 +595,8 @@ The transcript is built to hold a steady frame at 120 Hz.
 | `Settings.qml` | side, width, intervals, notification toggles |
 | `native/html.cppm` | HTML metadata parser behind the link previews |
 | `native/tests/` | unit tests for the parser and the agent's pure logic, the fuzz target and its corpus |
-| `Makefile` | builds all of the above; see **Building** |
+| `CMakeLists.txt` | builds all of the above; see **Building** |
+| `Makefile` | a shim over CMake, so `make install` still bootstraps the helper |
 | `Components/` | `ConversationList`, `MessageList`, `MessageItem`, `SmoothList`, `LinkCard`, `Composer`, `Mrkdwn.js` |
 
 `slack-agent` is usable on its own. Every subcommand prints one JSON object and

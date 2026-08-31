@@ -23,7 +23,6 @@ ColumnLayout {
     }
 
     property string editTokenPreference: initial("tokenPreference", "auto")
-    property string editRedirectUri: initial("redirectUri", "https://localhost:3000")
     property string editIdentityUserId: initial("identityUserId", "")
     property string editSide: initial("side", "right")
     property int editPanelWidth: initial("panelWidth", 460)
@@ -55,14 +54,6 @@ ColumnLayout {
         label: "App Client Secret"
         description: "Stored in the keyring, never written to a config file."
         placeholderText: root.credentialsStored ? "stored in keyring — type to replace" : "client secret"
-    }
-
-    NTextInput {
-        Layout.fillWidth: true
-        label: "Redirect URL"
-        description: "Register this exact value under OAuth & Permissions → Redirect URLs. It has to be a localhost address so the plugin can catch the callback itself."
-        text: root.editRedirectUri
-        onEditingFinished: root.editRedirectUri = text
     }
 
     NComboBox {
@@ -276,7 +267,6 @@ ColumnLayout {
             storeCredentials.running = true;
         }
 
-        pluginApi.pluginSettings.redirectUri = root.editRedirectUri.trim();
         pluginApi.pluginSettings.tokenPreference = root.editTokenPreference;
         pluginApi.pluginSettings.identityUserId = root.editIdentityUserId.trim();
         pluginApi.pluginSettings.side = root.editSide;

@@ -153,11 +153,21 @@ Item {
                     text: {
                         if (!root.main)
                             return "";
+                        // Before lastError, because the first-run build is
+                        // progress and would otherwise read as a failure.
+                        if (root.main.agentBuilding)
+                            return "Building the Slack helper…";
                         if (root.main.lastError !== "")
                             return root.main.lastError;
                         if (root.main.signingIn)
                             return "Approve the sign-in in your browser…";
-                        if (!root.inChat && !root.main.haveUserToken && !root.main.canSignIn)
+                        // Not gated on having no user token: an expired one is
+                        // still a token, and gating on its absence left the
+                        // sign-in entry greyed out with the reason nowhere on
+                        // screen until a poll happened to fail. Silent while a
+                        // token actually works, which is the case where the
+                        // credentials are nobody's business.
+                        if (!root.inChat && !root.main.canSignIn && !root.main.connected)
                             return "Add the app's Client ID and Secret in settings to sign in as yourself";
                         // Worth one line in the header: a token that works now but
                         // will expire unrenewably is otherwise silent until it dies.
@@ -172,6 +182,8 @@ Item {
                         return root.main.connected ? "All caught up" : "Not connected";
                     }
                     color: {
+                        if (root.main?.agentBuilding ?? false)
+                            return Color.mSecondary;
                         if ((root.main?.lastError ?? "") !== "")
                             return Color.mError;
                         if (root.main?.signingIn ?? false)
@@ -319,6 +331,7 @@ Item {
                 Slack.ConversationList {
                     anchors.fill: parent
                     conversations: root.main?.decorated ?? []
+                    loading: root.main?.conversationsPending ?? true
                     users: root.main?.userMap ?? ({})
                     activeId: root.main?.activeId ?? ""
                     botMode: root.main?.botMode ?? false

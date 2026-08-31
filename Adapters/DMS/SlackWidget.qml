@@ -122,6 +122,11 @@ PluginComponent {
 
                 Loader {
                     anchors.fill: parent
+                    // PopoutComponent gives its own header and details a
+                    // spacingS gutter but adds none for plugin content, so
+                    // without this the transcript sits flush on the edge.
+                    anchors.leftMargin: Theme.spacingS
+                    anchors.rightMargin: Theme.spacingS
                     sourceComponent: !slack.connected ? setupView : (slack.activeId === "" ? conversationView : transcriptView)
                 }
             }
@@ -167,8 +172,16 @@ PluginComponent {
                         width: parent.width
                         height: 44
                         radius: Theme.cornerRadius
-                        color: connectArea.containsMouse ? Theme.primaryHover : Theme.primary
+                        color: Theme.primary
                         opacity: popout.clientId !== "" && popout.clientSecret !== "" && slack.agentReady ? 1 : 0.45
+
+                        // Theme.primaryHover is a 12% tint meant to sit over a
+                        // surface, not to replace a filled button's own colour.
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: parent.radius
+                            color: Theme.withAlpha(Theme.onPrimary, connectArea.containsMouse ? 0.12 : 0)
+                        }
 
                         StyledText {
                             anchors.centerIn: parent
@@ -365,8 +378,14 @@ PluginComponent {
                             width: 48
                             height: parent.height
                             radius: Theme.cornerRadius
-                            color: sendArea.containsMouse ? Theme.primaryHover : Theme.primary
+                            color: Theme.primary
                             opacity: messageField.text.trim() !== "" && !slack.sending ? 1 : 0.45
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: parent.radius
+                                color: Theme.withAlpha(Theme.onPrimary, sendArea.containsMouse ? 0.12 : 0)
+                            }
 
                             DankIcon {
                                 anchors.centerIn: parent

@@ -31,6 +31,29 @@ Item {
     readonly property var activeConv: root.main?.activeConversation ?? null
     readonly property bool inThread: (root.main?.threadTs ?? "") !== ""
 
+    // Searching inside a conversation is a mode, not a permanent strip: the
+    // panel is narrow and the transcript wants every row it can get.
+    property bool searchOpen: false
+    // Whichever transcript is on screen; a search belongs to that one alone.
+    readonly property string transcriptKey: (root.main?.activeId ?? "") + "/" + (root.main?.threadTs ?? "")
+
+    function openSearch() {
+        root.searchOpen = true;
+        Qt.callLater(messageSearch.inputItem.forceActiveFocus);
+    }
+
+    function clearSearch() {
+        messageSearch.text = "";
+        root.searchOpen = false;
+    }
+
+    function dismissSearch() {
+        root.clearSearch();
+        Qt.callLater(composer.focusInput);
+    }
+
+    onTranscriptKeyChanged: root.clearSearch()
+
     anchors.fill: parent
 
     function iconFor(type) {
@@ -260,6 +283,23 @@ Item {
 
             NIconButton {
                 visible: root.inChat
+                icon: "search"
+                baseSize: 26
+                border.width: 0
+                colorBg: "transparent"
+                colorBgHover: Color.mHover
+                colorFg: root.searchOpen ? Color.mPrimary : Color.mOnSurfaceVariant
+                tooltipText: root.searchOpen ? "Close search" : (root.inThread ? "Search this thread" : "Search this conversation")
+                onClicked: {
+                    if (root.searchOpen)
+                        root.dismissSearch();
+                    else
+                        root.openSearch();
+                }
+            }
+
+            NIconButton {
+                visible: root.inChat
                 icon: (root.activeConv?.pinned ?? false) ? "pinned-filled" : "pinned"
                 baseSize: 26
                 border.width: 0
@@ -329,6 +369,7 @@ Item {
                 }
 
                 Slack.ConversationList {
+                    id: picker
                     anchors.fill: parent
                     conversations: root.main?.decorated ?? []
                     loading: root.main?.conversationsPending ?? true
@@ -366,10 +407,37 @@ Item {
                     anchors.fill: parent
                     spacing: Style.marginXS
 
+                    RowLayout {
+                        Layout.fillWidth: true
+                        // An invisible layout item takes no space, so the
+                        // transcript simply grows back when search closes.
+                        visible: root.searchOpen
+                        spacing: Style.marginS
+
+                        NTextInput {
+                            id: messageSearch
+                            Layout.fillWidth: true
+                            placeholderText: root.inThread ? "Search this thread" : "Search this conversation"
+                            inputIconName: "search"
+                            fontSize: Style.fontSizeS
+                            // Reaches the field because key events travel up the
+                            // focus chain from the TextField inside it.
+                            Keys.onEscapePressed: root.dismissSearch()
+                        }
+
+                        NText {
+                            visible: transcript.filtering
+                            text: transcript.matchCount === 1 ? "1 match" : (transcript.matchCount + " matches")
+                            color: Color.mOnSurfaceVariant
+                            pointSize: Style.fontSizeXXS
+                        }
+                    }
+
                     Slack.MessageList {
                         id: transcript
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        filter: root.searchOpen ? messageSearch.text : ""
                         messages: root.inThread ? (root.main?.threadMessages ?? []) : (root.main?.activeMessages ?? [])
                         users: root.main?.userMap ?? ({})
                         customEmoji: root.main?.customEmoji ?? ({})
@@ -463,7 +531,11 @@ Item {
     // Give the composer focus when a conversation opens, and the search field
     // when we come back out to the list.
     onInChatChanged: {
-        if (root.inChat)
+        if (root.inChat) {
             Qt.callLater(composer.focusInput);
+        } else {
+            root.clearSearch();
+            Qt.callLater(picker.focusSearch);
+        }
     }
 }

@@ -46,6 +46,13 @@ Item {
     property bool loadingOlder: false
     property string emptyText: "No messages yet"
 
+    // Free text to narrow the transcript down to. Only what has been loaded is
+    // searched: the rest of the history lives on Slack's servers, and paging it
+    // all in to answer a keystroke would be a lot of requests for a sidebar.
+    property string filter: ""
+    readonly property bool filtering: filter.trim() !== ""
+    readonly property int matchCount: rows.count
+
     // Changes when the view is showing a different conversation or thread.
     // Scroll state is per-conversation: coming back to the list and opening
     // something else should start at the bottom, not wherever you were.
@@ -64,7 +71,9 @@ Item {
     readonly property bool showJumpButton: !stickToLatest && !list.atEnd && rows.count > 0
 
     function _maybeLoadOlder() {
-        if (root.hasMore && !root.loadingOlder && rows.count > 0)
+        // While filtering the view is a result list, not a transcript: reaching
+        // its top means the results ran out, not the history.
+        if (root.hasMore && !root.loadingOlder && !root.filtering && rows.count > 0)
             root.loadOlderRequested();
     }
 
@@ -120,8 +129,25 @@ Item {
         return [msg.html || "", msg.author || "", msg.replyCount || 0, JSON.stringify(msg.reactions || []), JSON.stringify(msg.files || []), JSON.stringify(msg.attachments || []), JSON.stringify(msg.links || []), grouped, dayLabel, unreadMark].join("");
     }
 
+    // The raw text rather than the rendered HTML: markup a reader never sees
+    // should not be matchable, and `<@U024BE7LH>` is not what they typed.
+    function _matches(msg, needle) {
+        if ((msg.text || "").toLowerCase().indexOf(needle) >= 0)
+            return true;
+        if ((msg.author || "").toLowerCase().indexOf(needle) >= 0)
+            return true;
+        for (const file of (msg.files || []))
+            if ((file.name || "").toLowerCase().indexOf(needle) >= 0)
+                return true;
+        for (const att of (msg.attachments || []))
+            if ((att.title || "").toLowerCase().indexOf(needle) >= 0 || (att.text || "").toLowerCase().indexOf(needle) >= 0)
+                return true;
+        return false;
+    }
+
     function _buildRows() {
-        const source = root.messages || [];
+        const needle = root.filter.trim().toLowerCase();
+        const source = needle === "" ? (root.messages || []) : (root.messages || []).filter(m => root._matches(m, needle));
         const out = [];
         const byKey = ({});
         const cursor = root.readCursor === "" ? 0 : parseFloat(root.readCursor);
@@ -135,8 +161,10 @@ Item {
 
             const startsNewDay = !older || stamp.toDateString() !== new Date(parseFloat(older.ts) * 1000).toDateString();
 
+            // Results are not neighbours, so nothing about them may be inferred
+            // from the row above: every hit carries its own author and time.
             let grouped = false;
-            if (older && !root.inThread && older.user === msg.user && older.author === msg.author)
+            if (needle === "" && older && !root.inThread && older.user === msg.user && older.author === msg.author)
                 grouped = Math.abs(parseFloat(msg.ts) - parseFloat(older.ts)) < 300;
             // A day separator or an unread rule between two messages breaks the
             // group: a continuation under a divider reads as an orphan.
@@ -144,7 +172,7 @@ Item {
                 grouped = false;
 
             let unreadMark = false;
-            if (!seenUnread && !root.inThread && cursor > 0 && !msg.mine && parseFloat(msg.ts) > cursor) {
+            if (needle === "" && !seenUnread && !root.inThread && cursor > 0 && !msg.mine && parseFloat(msg.ts) > cursor) {
                 unreadMark = true;
                 seenUnread = true;
                 grouped = false;
@@ -237,6 +265,15 @@ Item {
     }
 
     onMessagesChanged: _refresh()
+
+    // A different set of rows entirely: keeping the old scroll offset would
+    // land somewhere arbitrary, so show the most recent matches, and on the way
+    // back out the bottom of the transcript.
+    onFilterChanged: {
+        root.stickToLatest = true;
+        _refresh();
+    }
+
     onReadCursorChanged: _refresh()
     onInThreadChanged: _refresh()
 
@@ -278,7 +315,7 @@ Item {
             Item {
                 width: list.availableWidth
                 height: visible ? Math.round(30 * Style.uiScaleRatio) : 0
-                visible: root.hasMore || root.loadingOlder
+                visible: (root.hasMore || root.loadingOlder) && !root.filtering
 
                 NText {
                     anchors.centerIn: parent
@@ -404,7 +441,7 @@ Item {
 
         NIcon {
             Layout.alignment: Qt.AlignHCenter
-            icon: root.loading ? "loader-2" : "messages"
+            icon: root.loading ? "loader-2" : (root.filtering ? "search" : "messages")
             color: Color.mOnSurfaceVariant
             pointSize: Style.fontSizeXXXL
         }
@@ -412,7 +449,13 @@ Item {
         NText {
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
-            text: root.loading ? "Loading..." : root.emptyText
+            text: {
+                if (root.loading)
+                    return "Loading...";
+                if (root.filtering)
+                    return root.messages.length === 0 ? root.emptyText : "Nothing loaded matches that";
+                return root.emptyText;
+            }
             color: Color.mOnSurfaceVariant
             pointSize: Style.fontSizeS
             wrapMode: Text.WordWrap

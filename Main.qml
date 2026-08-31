@@ -61,6 +61,7 @@ Item {
     property string userTokenHint: ""
     property bool signingIn: false
     property real _lastSignInPrompt: 0
+    property real _lastIdentityProbe: 0
     property bool haveClientId: false
     property bool haveClientSecret: false
     property bool haveRefreshToken: false
@@ -413,11 +414,31 @@ Item {
         }
         try {
             const res = JSON.parse(raw);
-            if (res.needsSignIn === true)
+            // `me` is the only call that sets connected, so the header used to
+            // hold whatever it said last: a session that died stayed green
+            // until something re-ran it, and a session repaired out of band -
+            // by signing in from a terminal, say - stayed red while every
+            // message loaded fine. A call Slack refuses proves the first; a
+            // call Slack answers while we believe we are disconnected is worth
+            // re-asking `me` about, which is the only thing that can also fill
+            // in who we are now.
+            if (res.needsSignIn === true) {
+                root.connected = false;
                 Qt.callLater(root._sessionExpired);
+            }
             if (res.ok !== true) {
                 root.lastError = res.error || (context + " failed");
                 return res;
+            }
+            // Not for `me`'s own reply, which is about to set connected itself,
+            // and not more than twice a minute: while the session really is
+            // dead, the calls that need no token still answer ok.
+            if (!root.connected && context !== "auth") {
+                const now = Date.now();
+                if (now - root._lastIdentityProbe > 30000) {
+                    root._lastIdentityProbe = now;
+                    Qt.callLater(root.refreshIdentity);
+                }
             }
             root.lastError = "";
             return res;

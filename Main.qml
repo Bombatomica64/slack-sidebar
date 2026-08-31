@@ -889,6 +889,17 @@ Item {
 
     readonly property bool panelVisible: (pluginApi?.panelOpenScreen ?? null) !== null
 
+    // The settings pane stores the Client ID and Secret with its own process, in
+    // a component tree that has no handle on this one, so nothing here learns
+    // that they arrived. Without this the sign-in entry stays greyed out for the
+    // rest of the session in which they were entered - which is exactly the
+    // session someone enters them in. A keyring read on panel open is cheap, and
+    // opening the sidebar is what you do next to click the thing.
+    onPanelVisibleChanged: {
+        if (root.panelVisible)
+            root.refreshCredentials();
+    }
+
     Timer {
         // Only while the sidebar is on screen — otherwise a conversation left
         // open would keep polling every few seconds forever. When hidden it

@@ -69,7 +69,7 @@ PluginComponent {
             DankIcon {
                 name: "chat"
                 color: slack.mentionCount > 0 ? Theme.error : (slack.totalUnread > 0 ? Theme.primary : Theme.onSurfaceVariant)
-                font.pixelSize: Theme.iconSizeSmall
+                size: Theme.iconSizeSmall
                 anchors.verticalCenter: parent.verticalCenter
             }
 
@@ -91,7 +91,7 @@ PluginComponent {
             DankIcon {
                 name: "chat"
                 color: slack.mentionCount > 0 ? Theme.error : (slack.totalUnread > 0 ? Theme.primary : Theme.onSurfaceVariant)
-                font.pixelSize: Theme.iconSizeSmall
+                size: Theme.iconSizeSmall
                 anchors.horizontalCenter: parent.horizontalCenter
             }
 
@@ -241,7 +241,7 @@ PluginComponent {
                             DankIcon {
                                 name: modelData.type === "im" ? "person" : "tag"
                                 color: modelData.mention ? Theme.error : (modelData.unread > 0 ? Theme.primary : Theme.onSurfaceVariant)
-                                font.pixelSize: Theme.iconSizeSmall
+                                size: Theme.iconSizeSmall
                                 anchors.verticalCenter: parent.verticalCenter
                             }
 
@@ -372,7 +372,7 @@ PluginComponent {
                                 anchors.centerIn: parent
                                 name: "send"
                                 color: Theme.onPrimary
-                                font.pixelSize: Theme.iconSizeSmall
+                                size: Theme.iconSizeSmall
                             }
 
                             MouseArea {

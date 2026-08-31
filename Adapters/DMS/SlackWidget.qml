@@ -116,6 +116,56 @@ PluginComponent {
             property string clientId: ""
             property string clientSecret: ""
 
+            headerActions: Component {
+                Row {
+                    spacing: Theme.spacingXS
+
+                    // Pinning decides whether a channel is polled at all, so it
+                    // belongs next to the conversation it acts on.
+                    DankActionButton {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: slack.activeId !== ""
+                        buttonSize: 28
+                        iconName: (slack.activeConversation?.pinned ?? false) ? "keep" : "keep_off"
+                        iconColor: (slack.activeConversation?.pinned ?? false) ? Theme.primary : Theme.surfaceVariantText
+                        tooltipText: (slack.activeConversation?.pinned ?? false) ? "Stop watching" : "Watch for new messages"
+                        onClicked: slack.togglePin(slack.activeId)
+                    }
+
+                    DankActionButton {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: slack.connected
+                        buttonSize: 28
+                        iconName: "open_in_new"
+                        iconColor: Theme.surfaceVariantText
+                        tooltipText: "Open in Slack"
+                        onClicked: slack.openInSlack(slack.activeId)
+                    }
+
+                    // Only worth offering when a second identity is stored.
+                    DankActionButton {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: slack.haveUserToken && slack.haveBotToken
+                        buttonSize: 28
+                        iconName: slack.botMode ? "smart_toy" : "person"
+                        iconColor: Theme.surfaceVariantText
+                        tooltipText: slack.botMode ? "Acting as the app - switch to you" : "Acting as you - switch to the app"
+                        onClicked: slack.requestIdentity(slack.botMode ? "user" : "bot")
+                    }
+
+                    DankActionButton {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: slack.connected
+                        buttonSize: 28
+                        iconName: "refresh"
+                        iconColor: Theme.surfaceVariantText
+                        enabled: !slack.polling
+                        tooltipText: slack.lastUpdate !== "" ? ("Refresh (last: " + slack.lastUpdate + ")") : "Refresh"
+                        onClicked: slack.refreshAll()
+                    }
+                }
+            }
+
             Item {
                 width: parent.width
                 implicitHeight: root.popoutHeight - popout.headerHeight - popout.detailsHeight - Theme.spacingXL
@@ -175,14 +225,6 @@ PluginComponent {
                         color: Theme.primary
                         opacity: popout.clientId !== "" && popout.clientSecret !== "" && slack.agentReady ? 1 : 0.45
 
-                        // Theme.primaryHover is a 12% tint meant to sit over a
-                        // surface, not to replace a filled button's own colour.
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: parent.radius
-                            color: Theme.withAlpha(Theme.primaryText, connectArea.containsMouse ? 0.12 : 0)
-                        }
-
                         StyledText {
                             anchors.centerIn: parent
                             text: slack.haveClientId && slack.haveClientSecret ? "Sign in with Slack" : "Save credentials"
@@ -191,11 +233,9 @@ PluginComponent {
                             font.weight: Font.Bold
                         }
 
-                        MouseArea {
-                            id: connectArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            enabled: popout.clientId !== "" && popout.clientSecret !== "" && slack.agentReady
+                        StateLayer {
+                            stateColor: Theme.primaryText
+                            disabled: popout.clientId === "" || popout.clientSecret === "" || !slack.agentReady
                             onClicked: {
                                 slack.storeCredentials(popout.clientId, popout.clientSecret);
                                 clientIdField.text = "";
@@ -211,7 +251,7 @@ PluginComponent {
                         width: parent.width
                         height: 44
                         radius: Theme.cornerRadius
-                        color: signInArea.containsMouse ? Theme.primaryHover : Theme.surfaceContainerHigh
+                        color: Theme.surfaceContainerHigh
 
                         StyledText {
                             anchors.centerIn: parent
@@ -220,11 +260,8 @@ PluginComponent {
                             font.pixelSize: Theme.fontSizeMedium
                         }
 
-                        MouseArea {
-                            id: signInArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            enabled: !slack.signingIn
+                        StateLayer {
+                            disabled: slack.signingIn
                             onClicked: slack.signIn()
                         }
                     }
@@ -234,68 +271,19 @@ PluginComponent {
             Component {
                 id: conversationView
 
-                ListView {
+                DankListView {
                     clip: true
                     spacing: Theme.spacingXS
                     model: slack.decorated
 
-                    delegate: Rectangle {
+                    delegate: SlackConversationRow {
                         required property var modelData
+
                         width: ListView.view.width
-                        height: 58
-                        radius: Theme.cornerRadius
-                        color: rowArea.containsMouse ? Theme.surfaceContainerHighest : Theme.surfaceContainerHigh
-
-                        Row {
-                            anchors.fill: parent
-                            anchors.margins: Theme.spacingM
-                            spacing: Theme.spacingM
-
-                            DankIcon {
-                                name: modelData.type === "im" ? "person" : "tag"
-                                color: modelData.mention ? Theme.error : (modelData.unread > 0 ? Theme.primary : Theme.surfaceVariantText)
-                                size: Theme.iconSizeSmall
-                                anchors.verticalCenter: parent.verticalCenter
-                            }
-
-                            Column {
-                                width: parent.width - 90
-                                anchors.verticalCenter: parent.verticalCenter
-
-                                StyledText {
-                                    width: parent.width
-                                    text: modelData.name
-                                    color: Theme.surfaceText
-                                    font.pixelSize: Theme.fontSizeMedium
-                                    font.weight: modelData.unread > 0 ? Font.Bold : Font.Normal
-                                    elide: Text.ElideRight
-                                }
-
-                                StyledText {
-                                    width: parent.width
-                                    text: modelData.latest?.text || modelData.topic || ""
-                                    color: Theme.surfaceVariantText
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    elide: Text.ElideRight
-                                }
-                            }
-
-                            StyledText {
-                                visible: modelData.unread > 0
-                                text: String(modelData.unread)
-                                color: modelData.mention ? Theme.error : Theme.primary
-                                font.pixelSize: Theme.fontSizeSmall
-                                font.weight: Font.Bold
-                                anchors.verticalCenter: parent.verticalCenter
-                            }
-                        }
-
-                        MouseArea {
-                            id: rowArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            onClicked: slack.openConversation(modelData.id)
-                        }
+                        conversation: modelData
+                        avatarMap: slack.avatarMap
+                        onActivated: slack.openConversation(modelData.id)
+                        onPinToggled: slack.togglePin(modelData.id)
                     }
                 }
             }
@@ -303,118 +291,167 @@ PluginComponent {
             Component {
                 id: transcriptView
 
-                Column {
-                    spacing: Theme.spacingS
+                Item {
+                    id: transcriptRoot
 
-                    Rectangle {
-                        width: parent.width
-                        height: 36
-                        color: "transparent"
+                    // Anchored rather than stacked in a Column: the message
+                    // list has to take the space the fixed rows leave, and a
+                    // height derived from its own y in a positioner loops.
 
-                        StyledText {
-                            text: "‹  Conversations"
-                            color: Theme.primary
-                            font.pixelSize: Theme.fontSizeMedium
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
+                        // Back to the conversation list, or out of a thread to
+                        // the conversation it belongs to.
+                        Item {
+                            id: backRow
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            height: 28
 
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: slack.closeConversation()
-                        }
-                    }
+                            Row {
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: Theme.spacingXS
 
-                    ListView {
-                        width: parent.width
-                        height: parent.height - composer.height - 48
-                        clip: true
-                        spacing: Theme.spacingM
-                        model: slack.activeMessages
-                        verticalLayoutDirection: ListView.BottomToTop
+                                DankIcon {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    name: "chevron_left"
+                                    size: Theme.iconSizeSmall
+                                    color: Theme.primary
+                                }
 
-                        delegate: Column {
-                            required property var modelData
-                            width: ListView.view.width
-                            spacing: Theme.spacingXS
-
-                            StyledText {
-                                width: parent.width
-                                text: modelData.author || slack.userMap[modelData.user]?.realName || slack.userMap[modelData.user]?.name || "unknown"
-                                color: modelData.mine ? Theme.primary : Theme.surfaceText
-                                font.pixelSize: Theme.fontSizeSmall
-                                font.weight: Font.Bold
+                                StyledText {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: slack.threadTs !== "" ? "Thread" : "Conversations"
+                                    color: Theme.primary
+                                    font.pixelSize: Theme.fontSizeMedium
+                                }
                             }
 
-                            StyledText {
-                                width: parent.width
-                                text: modelData.html || modelData.text || ""
-                                textFormat: Text.RichText
-                                // StyledText renders natively, and native
-                                // rendering leaves a rich text document on its
-                                // own default colour - black on a dark popout.
-                                // Noctalia's NText flips the same switch behind
-                                // its richTextEnabled flag.
-                                renderType: Text.QtRendering
-                                color: Theme.surfaceText
-                                font.pixelSize: Theme.fontSizeMedium
-                                wrapMode: Text.Wrap
-                                // StyledText elides by default, which truncates
-                                // a wrapped message instead of growing.
-                                elide: Text.ElideNone
-                                onLinkActivated: link => Qt.openUrlExternally(link)
-                            }
-                        }
-                    }
-
-                    Row {
-                        id: composer
-                        width: parent.width
-                        height: 44
-                        spacing: Theme.spacingS
-
-                        DankTextField {
-                            id: messageField
-                            width: parent.width - sendButton.width - parent.spacing
-                            placeholderText: "Message " + (slack.activeConversation?.name || "Slack")
-                            onAccepted: {
-                                if (slack.send(text))
-                                    text = "";
-                            }
-                        }
-
-                        Rectangle {
-                            id: sendButton
-                            width: 48
-                            height: parent.height
-                            radius: Theme.cornerRadius
-                            color: Theme.primary
-                            opacity: messageField.text.trim() !== "" && !slack.sending ? 1 : 0.45
-
-                            Rectangle {
-                                anchors.fill: parent
-                                radius: parent.radius
-                                color: Theme.withAlpha(Theme.primaryText, sendArea.containsMouse ? 0.12 : 0)
-                            }
-
-                            DankIcon {
-                                anchors.centerIn: parent
-                                name: "send"
-                                color: Theme.primaryText
-                                size: Theme.iconSizeSmall
-                            }
-
-                            MouseArea {
-                                id: sendArea
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                enabled: messageField.text.trim() !== "" && !slack.sending
+                            StateLayer {
                                 onClicked: {
-                                    if (slack.send(messageField.text))
-                                        messageField.text = "";
+                                    if (slack.threadTs !== "")
+                                        slack.closeThread();
+                                    else
+                                        slack.closeConversation();
                                 }
                             }
                         }
-                    }
+
+                        // A public channel that has not been joined is listed
+                        // for browsing, but Slack refuses its history.
+                        Rectangle {
+                            id: joinBanner
+                            anchors.top: backRow.bottom
+                            anchors.topMargin: visible ? Theme.spacingS : 0
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            visible: slack.activeNeedsJoin
+                            height: visible ? 40 : 0
+                            radius: Theme.cornerRadius
+                            color: Theme.surfaceContainerHigh
+
+                            Row {
+                                anchors.centerIn: parent
+                                spacing: Theme.spacingS
+
+                                StyledText {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: slack.joining ? "Joining…" : "Join this channel to read it"
+                                    color: Theme.surfaceText
+                                    font.pixelSize: Theme.fontSizeSmall
+                                }
+
+                                Rectangle {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: joinText.implicitWidth + Theme.spacingM * 2
+                                    height: 26
+                                    radius: Theme.cornerRadius
+                                    color: Theme.primary
+
+                                    StyledText {
+                                        id: joinText
+                                        anchors.centerIn: parent
+                                        text: "Join"
+                                        color: Theme.primaryText
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        font.weight: Font.Bold
+                                    }
+
+                                    StateLayer {
+                                        stateColor: Theme.primaryText
+                                        disabled: slack.joining
+                                        onClicked: slack.joinConversation(slack.activeId)
+                                    }
+                                }
+                            }
+                        }
+
+                        SlackMessageList {
+                            anchors.top: joinBanner.bottom
+                            anchors.topMargin: Theme.spacingS
+                            anchors.bottom: composer.top
+                            anchors.bottomMargin: Theme.spacingS
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            messages: slack.threadTs !== "" ? slack.threadMessages : slack.activeMessages
+                            inThread: slack.threadTs !== ""
+                            readCursor: slack.activeReadCursor
+                            loading: slack.threadTs !== "" ? slack.threadLoading : slack.activeLoading
+                            hasMore: slack.threadTs === "" && slack.activeHasMore
+                            loadingOlder: slack.loadingOlder
+                            customEmoji: slack.customEmoji
+                            avatarMap: slack.avatarMap
+                            unfurls: slack.unfurls
+                            sessionKey: slack.activeId + "/" + slack.threadTs
+                            emptyText: slack.activeNeedsJoin ? "Join the channel to read it" : "No messages yet"
+                            onLoadOlderRequested: slack.loadOlder()
+                            onThreadRequested: ts => slack.openThread(ts)
+                            onReactionToggled: (ts, name, mine) => slack.toggleReaction(ts, name, mine)
+                        }
+
+                        Row {
+                            id: composer
+                            anchors.bottom: parent.bottom
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            height: 44
+                            spacing: Theme.spacingS
+
+                            DankTextField {
+                                id: messageField
+                                width: parent.width - sendButton.width - parent.spacing
+                                placeholderText: slack.threadTs !== "" ? "Reply in thread" : ("Message " + (slack.activeConversation?.name || "Slack"))
+                                onAccepted: {
+                                    if (slack.send(text))
+                                        text = "";
+                                }
+                            }
+
+                            Rectangle {
+                                id: sendButton
+                                width: 48
+                                height: parent.height
+                                radius: Theme.cornerRadius
+                                color: Theme.primary
+                                opacity: messageField.text.trim() !== "" && !slack.sending ? 1 : 0.45
+
+                                DankIcon {
+                                    anchors.centerIn: parent
+                                    name: "send"
+                                    color: Theme.primaryText
+                                    size: Theme.iconSizeSmall
+                                }
+
+                                StateLayer {
+                                    stateColor: Theme.primaryText
+                                    disabled: messageField.text.trim() === "" || slack.sending
+                                    onClicked: {
+                                        if (slack.send(messageField.text))
+                                            messageField.text = "";
+                                    }
+                                }
+                            }
+                        }
                 }
             }
         }

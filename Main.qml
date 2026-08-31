@@ -43,9 +43,11 @@ Item {
     readonly property string identityUserId: setting("identityUserId", "")
     // auto | user | bot — which stored token to authenticate as.
     readonly property string tokenPreference: setting("tokenPreference", "auto")
-    // Must match a Redirect URL registered on the Slack app, and must be a
-    // loopback address so the plugin can answer the callback itself.
-    readonly property string redirectUri: setting("redirectUri", "https://localhost:3000")
+    // Not a setting. The agent can only answer the callback on loopback, this
+    // is the value the README tells you to register under OAuth & Permissions,
+    // and a field whose only correct value is the default is a field whose only
+    // use is getting the sign-in wrong.
+    readonly property string redirectUri: "https://localhost:3000"
     readonly property string sidePref: setting("side", "right")
     readonly property int panelWidthPref: setting("panelWidth", 460)
 
@@ -61,6 +63,7 @@ Item {
     property string userTokenHint: ""
     property bool signingIn: false
     property real _lastSignInPrompt: 0
+    property real _lastIdentityProbe: 0
     property bool haveClientId: false
     property bool haveClientSecret: false
     property bool haveRefreshToken: false
@@ -413,11 +416,31 @@ Item {
         }
         try {
             const res = JSON.parse(raw);
-            if (res.needsSignIn === true)
+            // `me` is the only call that sets connected, so the header used to
+            // hold whatever it said last: a session that died stayed green
+            // until something re-ran it, and a session repaired out of band -
+            // by signing in from a terminal, say - stayed red while every
+            // message loaded fine. A call Slack refuses proves the first; a
+            // call Slack answers while we believe we are disconnected is worth
+            // re-asking `me` about, which is the only thing that can also fill
+            // in who we are now.
+            if (res.needsSignIn === true) {
+                root.connected = false;
                 Qt.callLater(root._sessionExpired);
+            }
             if (res.ok !== true) {
                 root.lastError = res.error || (context + " failed");
                 return res;
+            }
+            // Not for `me`'s own reply, which is about to set connected itself,
+            // and not more than twice a minute: while the session really is
+            // dead, the calls that need no token still answer ok.
+            if (!root.connected && context !== "auth") {
+                const now = Date.now();
+                if (now - root._lastIdentityProbe > 30000) {
+                    root._lastIdentityProbe = now;
+                    Qt.callLater(root.refreshIdentity);
+                }
             }
             root.lastError = "";
             return res;
@@ -805,9 +828,10 @@ Item {
 
     // ------------------------------------------------------------- bootstrap
 
-    // The agent builds itself on first use. `make` is a no-op once the binary
-    // is current, so probing and building is cheap enough to do at every start
-    // and self-healing when the plugin is updated.
+    // The agent builds itself on first use, through the Makefile shim over
+    // CMake. Configuring and building are both no-ops once the binary is
+    // current, so probing and building is cheap enough to do at every start and
+    // self-healing when the plugin is updated.
     function _startup() {
         root.agentReady = true;
         refreshIdentity();
@@ -857,7 +881,7 @@ Item {
             }
             // Naming the two things that actually go wrong beats a build log in
             // a sidebar subtitle.
-            root.lastError = "Could not build the Slack helper. It needs make, Qt 6 development headers, libsecret and OpenSSL, and a compiler new enough for C++20 modules (clang 17+ or gcc 14+). Run `make` in " + root.pluginDir() + " to see why.";
+            root.lastError = "Could not build the Slack helper. It needs make, CMake 3.28+ with Ninja, Qt 6 development headers, libsecret, OpenSSL and SQLCipher, and clang 17+ for C++20 modules. Run `make` in " + root.pluginDir() + " to see why.";
             Logger.e("Slack", "helper build failed: " + root._buildLog.slice(-2000));
         }
     }
@@ -887,6 +911,17 @@ Item {
     }
 
     readonly property bool panelVisible: (pluginApi?.panelOpenScreen ?? null) !== null
+
+    // The settings pane stores the Client ID and Secret with its own process, in
+    // a component tree that has no handle on this one, so nothing here learns
+    // that they arrived. Without this the sign-in entry stays greyed out for the
+    // rest of the session in which they were entered - which is exactly the
+    // session someone enters them in. A keyring read on panel open is cheap, and
+    // opening the sidebar is what you do next to click the thing.
+    onPanelVisibleChanged: {
+        if (root.panelVisible)
+            root.refreshCredentials();
+    }
 
     Timer {
         // Only while the sidebar is on screen — otherwise a conversation left

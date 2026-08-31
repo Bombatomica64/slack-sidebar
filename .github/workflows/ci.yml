@@ -22,12 +22,13 @@ jobs:
 
       # clang only, and not by preference: gcc 13 segfaults compiling a module
       # that uses std::string, and gcc 14 ICEs on this code with or without
-      # debug info. The Makefile refuses gcc by version with that explanation.
+      # debug info. The build refuses gcc by version with that explanation.
       - name: Install the toolchain and libraries
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            clang libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
+            clang libclang-rt-dev cmake ninja-build \
+            qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
 
       - name: Show the toolchain the build settled on
         run: make CXX=clang++ print-config
@@ -53,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     # Never gates a merge, and never goes red. gcc cannot build this today -
     # 13 segfaults, 14 and 16 hit internal compiler errors on modules against Qt
-    # - and the Makefile refuses it for that reason. This job answers one
+    # - and CMakeLists.txt refuses it for that reason. This job answers one
     # question on every push: has the newest gcc fixed it? A "no" is a result,
     # not a failure, so the verdict goes in the run summary and the job exits 0.
     #
@@ -78,9 +79,10 @@ jobs:
           version=unknown
           if apt-get update -qq \
              && apt-get install -y --no-install-recommends \
-                  make pkg-config qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev; then
+                  make cmake ninja-build pkg-config \
+                  qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev; then
             version="$(g++ -dumpfullversion 2>/dev/null || echo unknown)"
-            # ALLOW_GCC=1 lifts the Makefile's own gate, so a failure here is
+            # ALLOW_GCC=1 lifts the build's own gate, so a failure here is
             # gcc's and not ours. STRICT stays off: a compiler this much newer
             # inventing a new warning is not what is being measured.
             if make CXX=g++ ALLOW_GCC=1 all test >gcc15.log 2>&1; then
@@ -96,8 +98,8 @@ jobs:
               builds)
                 echo "### gcc $version builds this :tada:"
                 echo
-                echo "The clang-only gate in the Makefile can go: set gcc's"
-                echo '`CXX_MIN` to 15 and restore a gcc entry in the `native` job.'
+                echo "The clang-only gate in CMakeLists.txt can go: drop the"
+                echo '`SLACK_ALLOW_GCC` check and restore a gcc entry in `native`.'
                 ;;
               fails)
                 echo "### gcc $version still cannot build this"
@@ -140,12 +142,13 @@ jobs:
       - uses: actions/checkout@v4
 
       # clang, not gcc: gcc 14 ICEs compiling a module unit with -fsanitize
-      # (cp/module.cc:9455). The Makefile refuses that combination outright.
+      # (cp/module.cc:9455). The build refuses that combination outright.
       - name: Install the toolchain and libraries
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            clang libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
+            clang libclang-rt-dev cmake ninja-build \
+            qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
 
       - name: Tests under AddressSanitizer and UndefinedBehaviorSanitizer
         run: make CXX=clang++ STRICT=1 SANITIZE=1 test
@@ -164,7 +167,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            clang libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
+            clang libclang-rt-dev cmake ninja-build \
+            qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
 
       - name: Fuzz for two minutes over the checked-in corpus
         run: make CXX=clang++ fuzz FUZZ_TIME=120
@@ -187,7 +191,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            clang llvm libclang-rt-dev qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
+            clang llvm libclang-rt-dev cmake ninja-build \
+            qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
 
       # Not a gate. Nothing here fails for a low number: the point is to make
       # visible which parts of the agent the tests do not reach, so that gap is

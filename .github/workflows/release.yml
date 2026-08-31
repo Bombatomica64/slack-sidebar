@@ -34,7 +34,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            clang qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
+            clang cmake ninja-build \
+            qt6-base-dev libsecret-1-dev libssl-dev libsqlcipher-dev
 
       - name: Build
         run: make CXX=clang++ STRICT=1 PORTABLE=1 all
@@ -45,7 +46,10 @@ jobs:
           # runtime dependencies the user's distro provides. libstdc++ is not:
           # it is statically linked so the binary loads on older distros too.
           ldd build/slack-agent || true
-          if ldd build/slack-agent | grep -qE 'libstdc\+\+|libgcc_s'; then
+          # readelf, not ldd: ldd walks the whole transitive closure, and Qt
+          # itself links libstdc++, so an ldd grep measures the C++ runtime of
+          # whoever built Qt rather than this binary's own linkage.
+          if readelf -d build/slack-agent | grep -qE 'NEEDED.*(libstdc\+\+|libgcc_s)'; then
             echo "binary still links libstdc++/libgcc dynamically" >&2
             exit 1
           fi

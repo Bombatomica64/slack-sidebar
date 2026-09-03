@@ -79,13 +79,24 @@ QString homeDir() {
 }
 
 // State is what would be painful to lose (read cursors); cache is what can be
-// rebuilt from Slack (conversation lists, avatars, link previews).
+// rebuilt from Slack (conversation lists, avatars, link previews). Existing
+// Noctalia installations used the old directory name. Prefer it only when the
+// shell-neutral directory does not exist yet, so upgrading keeps read cursors
+// without making a new DMS/end-4/Caelestia install host-specific.
+QString dataDir(const QString& base) {
+    const QString current = base + "/slack-sidebar";
+    const QString legacy = base + "/noctalia-slack";
+    if (!QFileInfo::exists(current) && QFileInfo::exists(legacy))
+        return legacy;
+    return current;
+}
+
 QString stateDir() {
-    return envOr("XDG_STATE_HOME", homeDir() + "/.local/state") + "/noctalia-slack";
+    return dataDir(envOr("XDG_STATE_HOME", homeDir() + "/.local/state"));
 }
 
 QString cacheDir() {
-    return envOr("XDG_CACHE_HOME", homeDir() + "/.cache") + "/noctalia-slack";
+    return dataDir(envOr("XDG_CACHE_HOME", homeDir() + "/.cache"));
 }
 
 void ensureDir(const QString& path) {

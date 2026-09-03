@@ -25,7 +25,7 @@ ifeq ($(origin CXX),default)
 endif
 
 BUILDDIR ?= build
-PREFIX   ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/noctalia-slack
+PREFIX   ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/slack-sidebar
 BINDIR   ?= $(PREFIX)/bin
 
 CMAKE  ?= cmake
@@ -65,7 +65,7 @@ endif
 # the CI job that runs it installs the QML tooling and nothing else, and should
 # not need Qt's development headers to check that a .qml file parses.
 QMLFORMAT := $(shell command -v qmlformat 2>/dev/null || echo /usr/lib/qt6/bin/qmlformat)
-QML_FILES := $(wildcard *.qml Components/*.qml)
+QML_FILES := $(shell find . -type f -name '*.qml' -print | sort)
 
 FUZZ_TIME      ?= 60
 COVERAGE_FLOOR ?= 25
@@ -96,6 +96,7 @@ endif
 	@$(MAKE) --no-print-directory qml
 
 qml:
+	@sh ./scripts/check-shell-boundaries.sh
 	@if [ ! -x "$(QMLFORMAT)" ]; then \
 	  echo "skipped: qmlformat not found (install qt6-declarative-dev-tools)"; exit 0; \
 	fi; \

@@ -855,7 +855,9 @@ Item {
         if (root.agentBuilding)
             return;
         root.agentBuilding = true;
-        buildProc.command = ["make", "-C", root.pluginDir(), "--no-print-directory", "PREFIX=" + root.cacheDir(), "BUILDDIR=" + root.cacheDir() + "/build", "install"];
+        // As with the helper probes, keep command-not-found inside a process so
+        // `onExited` can clear the busy state and report the dependency error.
+        buildProc.command = ["sh", "-c", 'exec "$@"', "sh", "make", "-C", root.pluginDir(), "--no-print-directory", "PREFIX=" + root.cacheDir(), "BUILDDIR=" + root.cacheDir() + "/build", "install"];
         buildProc.running = true;
     }
 
@@ -863,10 +865,14 @@ Item {
 
     // Any subcommand that needs neither a token nor the network will do; these
     // only read the keyring. A missing binary exits non-zero, which is the whole
-    // test: no file existence check, just ask it something.
+    // test.
     Process {
         id: bundledProbeProc
-        command: [root.bundledAgent(), "credentials"]
+        // A command that does not exist fails before Quickshell starts a
+        // process, and that path does not emit `exited`. Run the probe through
+        // a shell that always exists so a checkout without a bundled helper
+        // reliably falls through to the cached helper below.
+        command: ["sh", "-c", 'test -x "$1" && exec "$1" credentials; exit 127', "sh", root.bundledAgent()]
         stdout: StdioCollector {}
         stderr: StdioCollector {}
         onExited: (code, status) => {
@@ -881,7 +887,7 @@ Item {
 
     Process {
         id: probeProc
-        command: [root.cacheDir() + "/bin/slack-agent", "credentials"]
+        command: ["sh", "-c", 'test -x "$1" && exec "$1" credentials; exit 127', "sh", root.cacheDir() + "/bin/slack-agent"]
         stdout: StdioCollector {}
         stderr: StdioCollector {}
         onExited: (code, status) => {

@@ -19,6 +19,7 @@
 
 #include <cstddef>
 #include <iostream>
+#include <string>
 #include <string_view>
 
 // Includes before imports: see the note in html_meta_test.cpp.
@@ -200,6 +201,57 @@ void test_cursors() {
               "cursor: an unknown channel has none");
 }
 
+// -------------------------------------------------------- history paging
+
+// One raw message as `conversations.history` hands it over: only the subtype
+// and the timestamp matter to the paging decision.
+QJsonObject raw(const char* ts, const char* subtype) {
+    const auto qs = slack::util::qs;
+    QJsonObject out{{"ts", qs(ts)}, {"user", qs("UBOB")}, {"text", qs("hi")}};
+    if (subtype[0] != '\0')
+        out.insert(qs("subtype"), qs(subtype));
+    return out;
+}
+
+void test_history_paging() {
+    using slack::commands::interestingSubtype;
+    using slack::commands::nextHistoryPage;
+    const auto qs = slack::util::qs;
+
+    // What the sidebar renders, and what it drops.
+    for (const char* shown : {"", "bot_message", "thread_broadcast", "me_message", "file_share"})
+        expect(interestingSubtype(qs(shown)), std::string("subtype: renders ") + shown);
+    for (const char* noise : {"channel_join", "channel_leave", "channel_topic",
+                              "channel_purpose", "channel_name"})
+        expect(!interestingSubtype(qs(noise)), std::string("subtype: drops ") + noise);
+
+    // The bug: a whole page of joins and leaves shapes down to nothing, so the
+    // transcript came back empty with `hasMore: true` and stayed empty. The
+    // page has to be continued from its oldest entry.
+    const QJsonArray joinsOnly{raw("1781162867.584519", "channel_join"),
+                               raw("1779879184.496049", "channel_leave"),
+                               raw("1778071692.270579", "channel_join")};
+    expect_eq(nextHistoryPage(joinsOnly, true), qs("1778071692.270579"),
+              "paging: a page of nothing but joins continues from its oldest entry");
+
+    // One renderable message anywhere in the page is enough to stop.
+    const QJsonArray mixed{raw("1781162867.584519", "channel_join"),
+                           raw("1779879184.496049", ""),
+                           raw("1778071692.270579", "channel_join")};
+    expect(nextHistoryPage(mixed, false).isEmpty(),
+           "paging: a page with a real message needs no continuation");
+    expect(nextHistoryPage(mixed, true).isEmpty(),
+           "paging: and not even when Slack says there is more");
+
+    // Nothing older to ask for: `has_more` false, or no page at all. Either
+    // would otherwise be a request for the same page forever.
+    expect(nextHistoryPage(joinsOnly, false).isEmpty(),
+           "paging: joins-only stops when Slack has nothing older");
+    expect(nextHistoryPage(QJsonArray{}, true).isEmpty(), "paging: an empty page stops");
+    expect(nextHistoryPage(QJsonArray{raw("", "channel_join")}, true).isEmpty(),
+           "paging: a page whose oldest entry has no timestamp stops");
+}
+
 // ------------------------------------------------------------------ archive
 
 // A key the tests own, so none of this needs a running secret service. The real
@@ -333,6 +385,7 @@ int main(int argc, char** argv) {
     test_util();
     test_form_encoding();
     test_cursors();
+    test_history_paging();
     test_archive();
 
     if (g_failures == 0) {

@@ -135,6 +135,7 @@ simulate:
 	@if ! command -v $(LUAU) >/dev/null 2>&1 && [ ! -x "$(LUAU)" ]; then \
 	  echo "skipped: luau not found (get it from the luau-lang/luau releases)"; exit 0; \
 	fi; \
+	mkdir -p $(BUILDDIR) && \
 	cat $(SIM_PRELUDE) service.luau $(SIM_DRIVER) > $(BUILDDIR)/service_sim.luau && \
 	"$(LUAU)" $(BUILDDIR)/service_sim.luau
 

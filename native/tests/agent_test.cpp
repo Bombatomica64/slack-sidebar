@@ -252,6 +252,46 @@ void test_history_paging() {
            "paging: a page whose oldest entry has no timestamp stops");
 }
 
+// --------------------------------------------------------------- throttling
+
+void test_rate_limit_backoff() {
+    using slack::api::kRateLimitAttempts;
+    using slack::api::kRetryAfterCeilingMs;
+    using slack::api::rateLimitWaitMs;
+
+    // Slack's own number wins whenever it is one we are allowed to wait out.
+    expect(rateLimitWaitMs(1, 1) == 1000, "backoff: Retry-After: 1 waits a second");
+    expect(rateLimitWaitMs(5, 1) == 5000, "backoff: Retry-After is honoured verbatim");
+    expect(rateLimitWaitMs(5, 2) == 5000, "backoff: and again on the second attempt");
+
+    // No header: 1s, 2s, so a 429 without one is still not a busy loop. This is
+    // the whole of the old behaviour's replacement - it used to be one blind
+    // three-second sleep with no ceiling and no second look.
+    expect(rateLimitWaitMs(0, 1) == 1000, "backoff: a missing header starts at a second");
+    expect(rateLimitWaitMs(0, 2) == 2000, "backoff: and doubles");
+
+    // A wait longer than the ceiling is not this process's to take: the helper
+    // has a deadline, so it reports and lets the plugin's scheduler back off.
+    expect(rateLimitWaitMs(kRetryAfterCeilingMs / 1000 + 1, 1) == 0,
+           "backoff: a Retry-After past the ceiling is handed back, not slept on");
+    expect(rateLimitWaitMs(60, 1) == 0, "backoff: a minute-long throttle is handed back");
+
+    // The attempt budget is finite in both directions.
+    expect(rateLimitWaitMs(1, kRateLimitAttempts) == 0, "backoff: the last attempt reports");
+    expect(rateLimitWaitMs(1, kRateLimitAttempts + 5) == 0, "backoff: and so does anything past it");
+    expect(rateLimitWaitMs(1, 0) == 0, "backoff: attempt 0 is not a retry");
+
+    // The error shape the plugin switches on.
+    const auto qs = slack::util::qs;
+    const QJsonObject throttled{{"ok", false}, {"error", qs("ratelimited")}, {"retryAfter", 7}};
+    expect(slack::api::isRateLimited(throttled), "backoff: ratelimited is recognised");
+    expect(slack::api::retryAfterOf(throttled) == 7, "backoff: retryAfter is read back");
+    expect(!slack::api::isRateLimited(QJsonObject{{"ok", false}, {"error", qs("channel_not_found")}}),
+           "backoff: an unrelated error is not a throttle");
+    expect(slack::api::retryAfterOf(QJsonObject{{"ok", true}}) == 0,
+           "backoff: no retryAfter reads as zero");
+}
+
 // ------------------------------------------------------------------ archive
 
 // A key the tests own, so none of this needs a running secret service. The real
@@ -386,6 +426,7 @@ int main(int argc, char** argv) {
     test_form_encoding();
     test_cursors();
     test_history_paging();
+    test_rate_limit_backoff();
     test_archive();
 
     if (g_failures == 0) {

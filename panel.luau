@@ -408,7 +408,17 @@ local function threadView()
 end
 
 local function conversationView()
-  local rows = messageRows(active.messages)
+  -- "No messages" and "Slack refused to tell us" look identical on screen, and
+  -- that is exactly how a rate-limit regression stayed invisible: an empty pane
+  -- that actually meant throttled. Say which one it is.
+  local throttled = active.rateLimited == true
+  local held = #(active.messages or {})
+  local rows
+  if held == 0 and throttled then
+    rows = { ui.label({ text = tr("panel.rate_limited"), color = "error", maxLines = 3 }) }
+  else
+    rows = messageRows(active.messages)
+  end
   if active.hasMore == true then
     table.insert(rows, ui.button({
       key = "load-older",
@@ -432,6 +442,10 @@ local function conversationView()
     }))
   end
   table.insert(children, ui.scroll({ key = `msg-scroll-{active.id}`, flexGrow = 1, gap = 6, align = "stretch" }, rows))
+  -- Messages are still on screen, but they are the last ones that got through.
+  if throttled and held > 0 then
+    table.insert(children, ui.label({ text = tr("panel.rate_limited_stale"), color = "error", maxLines = 2 }))
+  end
   if noctalia.string.trim(tostring(active.sendError or "")) ~= "" then
     table.insert(children, ui.label({ text = tostring(active.sendError), color = "error", maxLines = 2 }))
   end

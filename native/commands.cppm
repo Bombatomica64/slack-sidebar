@@ -53,6 +53,9 @@ QString readCursorFor(api::Session& session, const QString& channel);
 bool crawlable(const QString& url);
 bool interestingSubtype(const QString& subtype);
 QString nextHistoryPage(const QJsonArray& page, bool hasMore);
+// Declared here so historySince can fall back to it; defined below.
+QJsonObject history(api::Session& session, const QString& channel, int limit, const QString& before,
+                    const QString& since = QString());
 }  // namespace slack::commands
 
 namespace {
@@ -62,11 +65,30 @@ using slack::commands::interestingSubtype;
 // How far one `history` call will walk looking for something the transcript can
 // render. The caller's limit sizes the first page only: continuing at that size
 // would make a five-message open crawl through a channel whose last hundred
-// events are joins, so every page after the first asks for a full window. Five
-// windows is a thousand events deep, which reaches 2013 in #random and past the
-// ninety-day retention of anything busier.
-constexpr int kHistoryPages = 5;
+// events are joins, so every page after the first asks for a full window.
+//
+// Three windows is six hundred events deep - still past #random's wall of joins
+// and past the ninety-day retention of anything busier, but a third of the
+// worst case this used to allow. The budget only ever gets spent on a cold open
+// now: the open conversation refreshes with `oldest` (see historySince), which
+// never pages at all.
+constexpr int kHistoryPages = 3;
 constexpr int kHistoryPageSize = 200;
+
+// The error shape every command hands back. `retryAfter` rides along whenever
+// Slack sent one, because the plugin's scheduler - not this process - is what
+// has to stop asking, and it can only do that if it is told how long for.
+QJsonObject failure(const QJsonObject& response, const QString& fallback) {
+    const QString error = u::str(response, "error", fallback);
+    QJsonObject out{{"ok", false},
+                    {"error", error},
+                    {"needsSignIn", slack::api::isAuthError(error)}};
+    if (slack::api::isRateLimited(response)) {
+        out[u::qs("rateLimited")] = true;
+        out[u::qs("retryAfter")] = slack::api::retryAfterOf(response);
+    }
+    return out;
+}
 
 QString authorOf(const QJsonObject& message, const QJsonObject& users) {
     const QString user = u::str(message, "user");
@@ -431,12 +453,65 @@ QJsonObject join(api::Session& session, const QString& channel) {
 
 // ---------------------------------------------------------------- messages
 
+// The open conversation used to re-read its whole transcript every few seconds,
+// which is what exhausted the rate limit. `since` asks the opposite question:
+// only what arrived *after* the newest message the panel already holds. On a
+// quiet conversation that is one call returning an empty array - and because the
+// caller only asks when `poll` has seen the conversation move, usually no call
+// at all.
+//
+// Deliberately never pages. A page with nothing renderable in it is the normal
+// answer here ("nothing new"), not the bug nextHistoryPage exists to work
+// around, so walking backwards would be both wrong and expensive.
+//
+// `oldest` pages FORWARD, which is easy to get wrong and was: when more than
+// `limit` messages have arrived, Slack answers with the OLDEST window of the
+// range and `has_more`, not the newest. Measured against the real API - asking
+// a DM for everything since a timestamp two years back returned a page ending
+// five days before its actual newest message. So an overflowing incremental
+// fetch is not salvageable as an increment, and falls back to a plain read.
+QJsonObject historySince(api::Session& session, const QString& channel, int limit,
+                         const QString& since) {
+    const QJsonObject response =
+        session.call(u::qs("GET"), u::qs("conversations.history"),
+                     {{u::qs("channel"), channel},
+                      {u::qs("limit"), QString::number(limit)},
+                      {u::qs("oldest"), since},
+                      // Exclusive: `since` is a message the caller already has.
+                      {u::qs("inclusive"), u::qs("false")}});
+    if (!u::boolean(response, "ok"))
+        return failure(response, u::qs("conversations.history failed"));
+
+    // More arrived than one page holds: what came back is the wrong end of the
+    // range. Read the conversation normally instead - one extra call, only ever
+    // after the sidebar has been away long enough to fall that far behind.
+    if (u::boolean(response, "has_more"))
+        return slack::commands::history(session, channel, limit, QString());
+
+    const QJsonArray raw = u::array(response, "messages");
+    const QJsonObject users = store::resolveUsers(session, collectUserIds(raw));
+    const QJsonArray shaped = shapeMessages(raw, users, session.mineIds());
+    archiveMessages(session, channel, shaped);
+
+    return {{"ok", true},
+            {"messages", shaped},
+            {"users", users},
+            {"incremental", true},
+            {"readCursor", store::cursorFor(store::cursors(session), channel)}};
+}
+
 // `before` pages backwards: Slack returns the messages older than that
-// timestamp. Paging by timestamp rather than by the cursor in
-// response_metadata is deliberate - the open conversation is re-polled every
-// few seconds, and a stored cursor would be invalidated by that, where the
-// oldest message we hold is always a valid place to continue from.
-QJsonObject history(api::Session& session, const QString& channel, int limit, const QString& before) {
+// timestamp, which is what the panel's "load older" button walks. Paging by
+// timestamp rather than by the cursor in response_metadata is deliberate - the
+// oldest message we hold is always a valid place to continue from, where a
+// stored cursor is invalidated by anything else touching the conversation.
+//
+// `since` is the other direction and the cheap one; see historySince.
+QJsonObject history(api::Session& session, const QString& channel, int limit, const QString& before,
+                    const QString& since) {
+    if (!since.isEmpty())
+        return historySince(session, channel, limit, since);
+
     QJsonArray raw;
     QString latest = before;
     bool hasMore = false;
@@ -461,8 +536,7 @@ QJsonObject history(api::Session& session, const QString& channel, int limit, co
         }
         const QJsonObject response = session.call(u::qs("GET"), u::qs("conversations.history"), params);
         if (!u::boolean(response, "ok")) {
-            const QString error = u::str(response, "error", u::qs("conversations.history failed"));
-            return {{"ok", false}, {"error", error}, {"needsSignIn", api::isAuthError(error)}};
+            return failure(response, u::qs("conversations.history failed"));
         }
         const QJsonArray current = u::array(response, "messages");
         for (const QJsonValue value : current)
@@ -502,8 +576,7 @@ QJsonObject replies(api::Session& session, const QString& channel, const QString
                                                {u::qs("ts"), thread},
                                                {u::qs("limit"), u::qs("100")}});
     if (!u::boolean(response, "ok")) {
-        const QString error = u::str(response, "error", u::qs("conversations.replies failed"));
-        return {{"ok", false}, {"error", error}, {"needsSignIn", api::isAuthError(error)}};
+        return failure(response, u::qs("conversations.replies failed"));
     }
     const QJsonArray raw = u::array(response, "messages");
     const QJsonObject users = store::resolveUsers(session, collectUserIds(raw));
@@ -602,12 +675,25 @@ QJsonObject poll(api::Session& session, const QString& idsCsv) {
 
     QJsonObject conversations;
     bool needsSignIn = false;
+    // A poll is a batch, so a throttle usually takes some slots and not others;
+    // the whole batch still has to be reported as throttled, or the plugin sees
+    // "unread: 0" for the slots that never answered and clears real badges.
+    bool rateLimited = false;
+    int retryAfter = 0;
 
     for (int i = 0; i < ids.size(); ++i) {
         const QJsonObject& response = responses[static_cast<std::size_t>(i)];
         const QString id = ids[i];
         const QString error = u::str(response, "error");
         needsSignIn = needsSignIn || api::isAuthError(error);
+        if (api::isRateLimited(response)) {
+            rateLimited = true;
+            retryAfter = std::max(retryAfter, api::retryAfterOf(response));
+            // Leave the conversation out of the answer entirely. A throttled
+            // slot knows nothing, and reporting the nothing as `unread: 0` is
+            // how a real badge gets cleared by a failure.
+            continue;
+        }
 
         const QString cursor = store::cursorFor(cursors, id);
         const double cursorTs = u::ts(cursor);
@@ -670,7 +756,12 @@ QJsonObject poll(api::Session& session, const QString& idsCsv) {
                                         {"latestUnread", latestUnread}};
     }
 
-    return {{"ok", true}, {"me", meId}, {"needsSignIn", needsSignIn}, {"conversations", conversations}};
+    return {{"ok", true},
+            {"me", meId},
+            {"needsSignIn", needsSignIn},
+            {"rateLimited", rateLimited},
+            {"retryAfter", retryAfter},
+            {"conversations", conversations}};
 }
 
 // Reconcile local cursors with Slack's own read state, so reading a channel on

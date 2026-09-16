@@ -33,7 +33,14 @@ local function pollIntervalMs() return cfgInt("poll_interval", 45) * 1000 end
 local function activePollIntervalMs() return cfgInt("active_poll_interval", 6) * 1000 end
 local function syncIntervalMs() return cfgInt("sync_interval", 300) * 1000 end
 local function historyLimit() return cfgInt("history_limit", 60) end
-local function maxWatched() return cfgInt("max_watched", 16) end
+local function maxWatched() return cfgInt("max_watched", 48) end
+-- How many of the watched conversations one poll actually asks about. See
+-- pollSlice: watching more conversations must not mean spending more requests.
+local function pollBatch() return cfgInt("poll_batch", 12) end
+-- An edit or a new reaction changes a message without changing the newest
+-- timestamp, so the incremental refresh cannot see it. This is how often the
+-- open conversation re-reads a whole page anyway.
+local function historyRefreshMs() return cfgInt("history_refresh_interval", 180) * 1000 end
 local function tokenPreference() return cfgString("token_preference", "bot") end
 local function identityUserId() return cfgString("identity_user_id", "") end
 
@@ -68,7 +75,44 @@ local seenFirstPoll = false
 
 local busyList, busyPoll, busySync, busyAvatars = false, false, false, false
 local lastListAt, lastPollAt, lastSyncAt, lastHistoryAt, lastAvatarAt = 0, 0, 0, 0, 0
+local lastActivePollAt, lastFullHistoryAt = 0, 0
+local pollCursor = 0          -- where the rotating slice of watchedIds resumes
+local lastPolledIds = {}      -- the slice the last poll covered; sync-read reuses it
 local statusRevision, activeRevision = 0, 0
+
+-- Rate-limit backoff. Slack answers a throttled call with 429 and a Retry-After;
+-- the helper waits out a short one itself and hands a long one back here, where
+-- the only useful response is to stop asking for a while. Retrying on the very
+-- next tick is what turned one throttle into a sidebar that never recovered.
+local rateLimited = false
+local backoffUntil = 0
+local backoffStep = 0
+local BACKOFF_CEILING_MS = 120000
+
+local function noteRateLimit(retryAfter)
+  backoffStep = math.min(backoffStep + 1, 7)
+  -- 2s, 4s, 8s … capped, or Slack's own number when it asked for longer.
+  local wait = math.min(2 ^ backoffStep * 1000, BACKOFF_CEILING_MS)
+  local hinted = (tonumber(retryAfter) or 0) * 1000
+  if hinted > wait then wait = math.min(hinted, BACKOFF_CEILING_MS) end
+  rateLimited = true
+  backoffUntil = noctalia.nowMs() + wait
+  noctalia.log(`slack: rate limited, backing off {math.floor(wait / 1000)}s`)
+end
+
+local function noteAgentOk()
+  if rateLimited or backoffStep ~= 0 then
+    rateLimited = false
+    backoffStep = 0
+    backoffUntil = 0
+  end
+end
+
+local function throttled() return noctalia.nowMs() < backoffUntil end
+
+-- Slack timestamps are "1712345678.000200" strings; tonumber orders them
+-- correctly and an absent one sorts oldest.
+local function tsValue(ts) return tonumber(ts) or 0 end
 
 -- ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -128,12 +172,23 @@ local function runAgent(args, context, timeoutMs, onOk)
       onOk(nil)
       return
     end
+    -- A throttle is not a failure of the thing being asked for, and must never
+    -- read as one: the panel keeps what it has and says it is throttled, and
+    -- every timer stands down until the backoff expires.
+    if decoded.error == "ratelimited" or decoded.rateLimited == true then
+      noteRateLimit(decoded.retryAfter)
+      lastError = noctalia.tr("error.rate_limited")
+      -- `poll` still answers ok with partial results; hand those on.
+      onOk(decoded.ok == true and decoded or nil)
+      return
+    end
     if decoded.ok ~= true then
       lastError = trim(decoded.error) ~= "" and tostring(decoded.error)
         or noctalia.tr("error.helper_failed", { context = context })
       onOk(nil)
       return
     end
+    noteAgentOk()
     lastError = ""
     onOk(decoded)
   end, timeoutMs or 60000)
@@ -606,6 +661,11 @@ local function publishActive()
     threadTs = threadTs,
     threadLoading = threadLoading,
     threadMessages = viewList(threadMessages),
+    -- An empty transcript that actually means "Slack throttled us" is the bug
+    -- that made this whole regression invisible. The panel gets told which one
+    -- it is looking at.
+    rateLimited = rateLimited,
+    error = rateLimited and noctalia.tr("error.rate_limited") or "",
     revision = activeRevision,
   })
 end
@@ -652,6 +712,13 @@ local function notifyForPoll(next)
       end
     end
   end
+  -- `next` is one rotating slice of the watched list, not all of it. Whatever it
+  -- did not mention keeps the timestamp it already had, or the conversation
+  -- would re-announce its newest message every time the rotation came back to
+  -- it.
+  for id, ts in pairs(notifiedTs) do
+    if next[id] == nil then seen[id] = ts end
+  end
   notifiedTs = seen
 end
 
@@ -691,23 +758,95 @@ local function refreshList(force)
   end)
 end
 
-local function poll()
+-- `poll` costs one Slack request per conversation in the batch, so asking about
+-- all `max_watched` of them on every tick made the request rate a multiple of a
+-- setting that exists to make *badges* better. It does not have to: the open
+-- conversation is always in the batch, and the rest take turns.
+--
+-- With the defaults (48 watched, 12 per batch, a 45s tick) a full sweep takes
+-- four ticks - three minutes - instead of one 48-request burst. A background
+-- channel's badge is therefore up to a sweep stale, which for a channel nobody
+-- is looking at is minutes-old news anyway; the open conversation and the DMs at
+-- the head of watchedIds are never stale, because the active tick covers the
+-- former and the rotation reaches the latter first.
+local function pollSlice()
   local ids = watchedIds()
+  local batch = math.max(1, pollBatch())
+  if #ids <= batch then
+    pollCursor = 0
+    return ids
+  end
+
+  local out, seen = {}, {}
+  if activeId ~= "" then
+    table.insert(out, activeId)
+    seen[activeId] = true
+  end
+  local scanned = 0
+  while #out < batch and scanned < #ids do
+    local id = ids[(pollCursor + scanned) % #ids + 1]
+    if not seen[id] then
+      seen[id] = true
+      table.insert(out, id)
+    end
+    scanned += 1
+  end
+  pollCursor = (pollCursor + scanned) % #ids
+  return out
+end
+
+local function poll()
+  local ids = pollSlice()
   if #ids == 0 or busyPoll then return end
   busyPoll = true
   lastPollAt = noctalia.nowMs()
+  lastPolledIds = ids
   runAgent({ "poll", table.concat(ids, ",") }, "poll", 120000, function(res)
     busyPoll = false
     if res and type(res.conversations) == "table" then
       notifyForPoll(res.conversations)
-      pollState = res.conversations
+      -- A slice, not the whole list: merge, or every conversation this tick did
+      -- not ask about would report zero unread and lose its badge. A throttled
+      -- slot is missing from the answer for the same reason, and is kept too.
+      for id, state in pairs(res.conversations) do
+        pollState[id] = state
+      end
+      -- Anything no longer watched stops contributing to the totals.
+      local watched = {}
+      for _, id in ipairs(watchedIds()) do watched[id] = true end
+      for id in pairs(pollState) do
+        if not watched[id] then pollState[id] = nil end
+      end
     end
     publishStatus()
   end)
 end
 
+-- Just the open conversation, on the fast tick: one request, which is what
+-- makes the transcript feel live without the other 47 riding along.
+local function pollActive()
+  if activeId == "" or busyPoll then return end
+  busyPoll = true
+  lastActivePollAt = noctalia.nowMs()
+  local channel = activeId
+  runAgent({ "poll", channel }, "poll", 60000, function(res)
+    busyPoll = false
+    if res and type(res.conversations) == "table" then
+      notifyForPoll(res.conversations)
+      for id, state in pairs(res.conversations) do
+        pollState[id] = state
+      end
+    end
+    publishStatus()
+  end)
+end
+
+-- Reconciles local read cursors with Slack's, one `conversations.info` per id.
+-- Same slice the last poll used, for the same reason: it is per-conversation
+-- cost on a timer, and the tail does not need it any sooner than the rotation
+-- reaches it.
 local function syncReadState()
-  local ids = watchedIds()
+  local ids = #lastPolledIds > 0 and lastPolledIds or pollSlice()
   if #ids == 0 or busySync then return end
   busySync = true
   lastSyncAt = noctalia.nowMs()
@@ -740,7 +879,7 @@ local function markActiveRead()
     }
     if channel == activeId then activeReadCursor = newest end
     publishStatus()
-    poll()
+    pollActive()
   end)
 end
 
@@ -758,19 +897,74 @@ local function mergeHistory(fresh)
   return merged
 end
 
-local function loadHistory(channel)
+-- The newest message the transcript is holding, or "" when it holds none.
+local function activeNewestTs()
+  return #activeMessages > 0 and tostring(activeMessages[1].ts or "") or ""
+end
+
+-- `fresh` is newest-first and entirely newer than what we hold, so it goes on
+-- the front. Keyed on ts anyway: a message we just sent is already in the list,
+-- and a duplicate of it would render twice.
+local function prependNew(fresh)
+  if #fresh == 0 then return activeMessages end
+  local have = {}
+  for _, m in ipairs(activeMessages) do have[tostring(m.ts or "")] = true end
+  local merged = {}
+  for _, m in ipairs(fresh) do
+    if not have[tostring(m.ts or "")] then table.insert(merged, m) end
+  end
+  if #merged == 0 then return activeMessages end
+  for _, m in ipairs(activeMessages) do table.insert(merged, m) end
+  return merged
+end
+
+-- `incremental` asks only for what arrived after the newest message already on
+-- screen. That is the whole rate-limit fix: the open conversation used to
+-- re-request its entire `history_limit` every `active_poll_interval`, which on
+-- the six-second default is ten full transcripts a minute, every minute, for a
+-- conversation nobody was typing in.
+local function loadHistory(channel, incremental)
   channel = channel or activeId
   if channel == "" then return end
+
+  local since = ""
+  if incremental and channel == activeId then since = activeNewestTs() end
+
+  local now = noctalia.nowMs()
   activeLoading = true
-  lastHistoryAt = noctalia.nowMs()
+  lastHistoryAt = now
+  -- Only a full read resets the full-read clock; an incremental one has not
+  -- looked at the older messages at all.
+  if since == "" then lastFullHistoryAt = now end
   publishActive()
-  runAgent({ "history", channel, tostring(historyLimit()) }, "history", 90000, function(res)
+
+  local args = { "history", channel, tostring(historyLimit()) }
+  if since ~= "" then
+    -- Positional: <channel> <limit> <before-ts> <since-ts>. No `before`, so the
+    -- slot is empty.
+    table.insert(args, "")
+    table.insert(args, since)
+  end
+
+  runAgent(args, "history", 90000, function(res)
     activeLoading = false
     if res and channel == activeId then
       mergeUsers(res.users)
-      activeMessages = mergeHistory(res.messages or {})
+      -- An incremental answer is strictly newer than what is on screen, so it
+      -- goes on the front. If more had arrived than one page holds the helper
+      -- would have answered with a plain read instead (see historySince), which
+      -- lands in the branch below.
+      if res.incremental == true then
+        activeMessages = prependNew(res.messages or {})
+      else
+        -- Either a read we asked for, or an incremental one the helper turned
+        -- into a plain read because too much had arrived. Both are a whole
+        -- page, so both reset the slow-refresh clock.
+        lastFullHistoryAt = noctalia.nowMs()
+        activeMessages = mergeHistory(res.messages or {})
+        activeHasMore = res.hasMore == true
+      end
       activeReadCursor = tostring(res.readCursor or "")
-      activeHasMore = res.hasMore == true
       if cfgBool("mark_read_on_open", true) then markActiveRead() end
     end
     publishActive()
@@ -824,7 +1018,7 @@ local function openConversation(id)
   end
   publishActive()
   loadHistory(id)
-  poll()
+  pollActive()
 end
 
 local function sendMessage(text)
@@ -843,8 +1037,8 @@ local function sendMessage(text)
       return
     end
     sendError = ""
-    if threadTs ~= "" then loadThread(threadTs) else loadHistory() end
-    poll()
+    if threadTs ~= "" then loadThread(threadTs) else loadHistory(activeId, true) end
+    pollActive()
   end)
 end
 
@@ -891,6 +1085,11 @@ local function executeCommand(command)
   local action = tostring(command.action or "")
 
   if action == "refresh" then
+    -- The user asking out loud clears the backoff: they would rather see the
+    -- throttle again than a sidebar that refuses to try.
+    backoffUntil = 0
+    backoffStep = 0
+    rateLimited = false
     refreshIdentity()
     refreshList(true)
     poll()
@@ -964,14 +1163,40 @@ noctalia.setUpdateInterval(1000)
 function update()
   if not ready then return end
   local now = noctalia.nowMs()
-  local pollEvery = activeId ~= "" and activePollIntervalMs() or pollIntervalMs()
-  if now - lastPollAt >= pollEvery then poll() end
+  -- Throttled: every timer stands down together. Asking a smaller question
+  -- while Slack is refusing is still asking.
+  if throttled() then return end
+
+  -- Two cadences, not one. The open conversation is asked about every
+  -- `active_poll_interval` because that is what makes it feel live, and costs
+  -- exactly one request; the watched list takes turns at `poll_interval`,
+  -- `poll_batch` at a time. Before this, an open conversation put *every*
+  -- watched conversation on the six-second tick.
+  if activeId ~= "" and now - lastActivePollAt >= activePollIntervalMs() then pollActive() end
+  if now - lastPollAt >= pollIntervalMs() then poll() end
   if now - lastListAt >= 600000 then refreshList(false) end
   if now - lastSyncAt >= syncIntervalMs() then syncReadState() end
   -- The agent downloads avatars for every user it learns about; re-read its
   -- cache a few seconds after the user map grows (the v4 4s debounce).
   if avatarsDirty and now - lastAvatarAt >= 4000 then refreshAvatars() end
+
+  -- The floor is what stops a conversation whose history call keeps failing from
+  -- retrying on every one-second tick: the transcript stays empty, so the
+  -- "something is newer" test below stays true forever.
   if activeId ~= "" and not activeLoading and now - lastHistoryAt >= activePollIntervalMs() then
-    loadHistory()
+    -- Fetch only when `poll` has actually seen something newer than the newest
+    -- message on screen, and then only the part that is new. A quiet open
+    -- conversation costs no history requests at all, where it used to cost one
+    -- full transcript every six seconds.
+    local state = pollState[activeId]
+    local latest = type(state) == "table" and type(state.latest) == "table" and state.latest or nil
+    local newest = latest and tostring(latest.ts or "") or ""
+    if newest ~= "" and tsValue(newest) > tsValue(activeNewestTs()) then
+      loadHistory(activeId, true)
+    elseif now - lastFullHistoryAt >= historyRefreshMs() then
+      -- An edit or a reaction moves no timestamp, so a whole page is still
+      -- re-read - about twice an hour rather than six hundred times.
+      loadHistory(activeId, false)
+    end
   end
 end

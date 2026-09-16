@@ -35,7 +35,8 @@ QJsonObject usage() {
     return {{"ok", false},
             {"error", u::qs("usage: slack-agent [--token user|bot|auto] [--me <userId>] [--no-archive] "
                             "[--identity user|bot] "
-                            "{me|list|poll|history [channel] [limit] [before-ts]|replies|send|read|react|join|emoji|avatars|"
+                            "{me|list|poll|history [channel] [limit] [before-ts] [since-ts]|replies|send|read|react|join|"
+                            "emoji|avatars|"
                             "unfurl|sync-read|users|tokens|credentials|set-credentials|signin|"
                             "archive|archive-revisions|archive-stats|archive-key [hex-to-restore]|"
                             "parse-html|reset}")}};
@@ -165,7 +166,7 @@ int main(int argc, char** argv) {
         result = slack::commands::poll(session, argAt(args, 0));
     else if (verb == u::qs("history"))
         result = slack::commands::history(session, argAt(args, 0), argAt(args, 1, u::qs("50")).toInt(),
-                                          argAt(args, 2));
+                                          argAt(args, 2), argAt(args, 3));
     else if (verb == u::qs("replies"))
         result = slack::commands::replies(session, argAt(args, 0), argAt(args, 1));
     else if (verb == u::qs("send"))

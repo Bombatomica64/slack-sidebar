@@ -56,6 +56,11 @@ struct Response {
     QString contentType;
     QString finalUrl;
     QString transportError;                     // empty unless the request never completed
+    // Whole seconds from a `Retry-After` header, 0 when the server sent none.
+    // Slack puts one on every 429 and it is the only number that says how long
+    // the throttle actually lasts; guessing instead is what turns one throttled
+    // call into a stream of them.
+    int retryAfterSeconds = 0;
 
     [[nodiscard]] bool transportOk() const { return transportError.isEmpty() && status > 0; }
 };
@@ -145,6 +150,18 @@ public:
                 response.status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
                 response.contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
                 response.finalUrl = reply->url().toString();
+                if (reply->hasRawHeader(QByteArrayLiteral("Retry-After"))) {
+                    bool ok = false;
+                    const int seconds =
+                        QString::fromLatin1(reply->rawHeader(QByteArrayLiteral("Retry-After")))
+                            .trimmed()
+                            .toInt(&ok);
+                    // Only the delta-seconds form; the HTTP-date form is legal
+                    // but Slack never sends it, and a misparsed date would be a
+                    // wait of decades.
+                    if (ok && seconds > 0)
+                        response.retryAfterSeconds = seconds;
+                }
 
                 const QUrl redirect = reply->attribute(QNetworkRequest::RedirectionTargetAttribute).toUrl();
                 if (!redirect.isEmpty() && redirectsLeft[index] > 0) {

@@ -35,7 +35,7 @@
   "settings.history_limit.label": "History limit",
   "settings.history_limit.description": "Messages fetched per page of a conversation.",
   "settings.max_watched.label": "Watched conversations",
-  "settings.max_watched.description": "Maximum conversations polled for unread counts.",
+  "settings.max_watched.description": "Maximum conversations tracked for unread counts. They are polled a few at a time (see “Conversations per poll”), so raising this costs staleness, not requests.",
   "settings.side.label": "Sidebar edge",
   "settings.side.description": "Which screen edge the sidebar docks to. Width is fixed in plugin.toml.",
   "settings.side.options.right": "Right",
@@ -65,5 +65,12 @@
   "colors.primary": "Primary",
   "colors.secondary": "Secondary",
   "colors.tertiary": "Tertiary",
-  "colors.error": "Error"
+  "colors.error": "Error",
+  "error.rate_limited": "Slack is rate-limiting this app — backing off and retrying shortly",
+  "panel.rate_limited": "Rate-limited by Slack — messages could not be loaded. Retrying shortly.",
+  "panel.rate_limited_stale": "Rate-limited by Slack — showing the last messages loaded",
+  "settings.poll_batch.label": "Conversations per poll",
+  "settings.poll_batch.description": "How many watched conversations each poll asks about. The rest take turns, so this caps the request rate.",
+  "settings.history_refresh_interval.label": "Full transcript refresh (seconds)",
+  "settings.history_refresh_interval.description": "How often the open conversation re-reads a whole page to pick up edits and reactions. New messages arrive incrementally regardless."
 }

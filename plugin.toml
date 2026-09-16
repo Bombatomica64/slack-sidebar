@@ -121,7 +121,11 @@ key = "token_preference"
 type = "select"
 label_key = "settings.token_preference.label"
 description_key = "settings.token_preference.description"
-default = "bot"
+# "auto" was v4's manifest default and is the only safe one: a bot token is not
+# a member of your DMs, so forcing "bot" makes every DM history call return
+# channel_not_found. The port briefly defaulted to "bot" because that was the
+# value in one user's saved settings.json, which is a preference, not a default.
+default = "auto"
 options = [
   { value = "auto", label_key = "settings.token_preference.options.auto" },
   { value = "user", label_key = "settings.token_preference.options.user" },

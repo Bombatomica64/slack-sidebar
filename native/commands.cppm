@@ -51,17 +51,22 @@ QString readCursorFor(api::Session& session, const QString& channel);
 // Declared here because the file-local helpers below call it, and defined with
 // the rest of the exported surface further down.
 bool crawlable(const QString& url);
+bool interestingSubtype(const QString& subtype);
+QString nextHistoryPage(const QJsonArray& page, bool hasMore);
 }  // namespace slack::commands
 
 namespace {
 
-// Subtypes worth showing. Everything else (joins, leaves, topic changes) is
-// noise in a sidebar this size.
-bool interestingSubtype(const QString& subtype) {
-    return subtype.isEmpty() || subtype == u::qs("bot_message") ||
-           subtype == u::qs("thread_broadcast") || subtype == u::qs("me_message") ||
-           subtype == u::qs("file_share");
-}
+using slack::commands::interestingSubtype;
+
+// How far one `history` call will walk looking for something the transcript can
+// render. The caller's limit sizes the first page only: continuing at that size
+// would make a five-message open crawl through a channel whose last hundred
+// events are joins, so every page after the first asks for a full window. Five
+// windows is a thousand events deep, which reaches 2013 in #random and past the
+// ninety-day retention of anything busier.
+constexpr int kHistoryPages = 5;
+constexpr int kHistoryPageSize = 200;
 
 QString authorOf(const QJsonObject& message, const QJsonObject& users) {
     const QString user = u::str(message, "user");
@@ -380,6 +385,33 @@ QJsonObject setCredentials(const QString& clientId, const QString& clientSecret)
     return {{"ok", true}};
 }
 
+// ---------------------------------------------------------------- filtering
+
+// Subtypes worth showing. Everything else (joins, leaves, topic changes) is
+// noise in a sidebar this size, and - because it is dropped rather than
+// rendered - noise that must not be counted as unread either.
+bool interestingSubtype(const QString& subtype) {
+    return subtype.isEmpty() || subtype == u::qs("bot_message") ||
+           subtype == u::qs("thread_broadcast") || subtype == u::qs("me_message") ||
+           subtype == u::qs("file_share");
+}
+
+// Given one raw page of `conversations.history` and its `has_more`, the
+// `latest` bound to ask the next page with, or an empty string when this page
+// needs no continuation. Empty means: the page already holds something the
+// transcript will render, or Slack has nothing older to give.
+QString nextHistoryPage(const QJsonArray& page, bool hasMore) {
+    if (page.isEmpty() || !hasMore)
+        return {};
+    for (const QJsonValue value : page) {
+        if (interestingSubtype(u::str(value.toObject(), "subtype")))
+            return {};
+    }
+    // Newest first, so the oldest of the page is its last entry. A page with no
+    // usable timestamp would loop forever asking the same question.
+    return u::str(page.last().toObject(), "ts");
+}
+
 // ------------------------------------------------------------ conversations
 
 QJsonObject list(api::Session& session, bool force) {
@@ -405,29 +437,63 @@ QJsonObject join(api::Session& session, const QString& channel) {
 // few seconds, and a stored cursor would be invalidated by that, where the
 // oldest message we hold is always a valid place to continue from.
 QJsonObject history(api::Session& session, const QString& channel, int limit, const QString& before) {
-    QList<std::pair<QString, QString>> params{{u::qs("channel"), channel},
-                                              {u::qs("limit"), QString::number(limit)}};
-    if (before.isEmpty()) {
-        params.append({u::qs("inclusive"), u::qs("true")});
-    } else {
-        params.append({u::qs("latest"), before});
-        // Exclusive, or every page would repeat the message it started from.
-        params.append({u::qs("inclusive"), u::qs("false")});
+    QJsonArray raw;
+    QString latest = before;
+    bool hasMore = false;
+
+    // Slack counts joins and leaves against `limit`, the transcript does not
+    // show them, so a full page can shape down to nothing at all - a quiet
+    // channel whose last hundred events are all "has joined the channel"
+    // answered with an empty array and `hasMore: true`, and nothing ever went
+    // back for the page behind it. Keep asking for the next page until one of
+    // them holds something worth rendering. Bounded: a channel that really is
+    // nothing but joins costs a handful of calls rather than a walk to 2013.
+    for (int page = 0; page < kHistoryPages; ++page) {
+        const int size = page == 0 ? limit : kHistoryPageSize;
+        QList<std::pair<QString, QString>> params{{u::qs("channel"), channel},
+                                                  {u::qs("limit"), QString::number(size)}};
+        if (latest.isEmpty()) {
+            params.append({u::qs("inclusive"), u::qs("true")});
+        } else {
+            params.append({u::qs("latest"), latest});
+            // Exclusive, or every page would repeat the message it started from.
+            params.append({u::qs("inclusive"), u::qs("false")});
+        }
+        const QJsonObject response = session.call(u::qs("GET"), u::qs("conversations.history"), params);
+        if (!u::boolean(response, "ok")) {
+            const QString error = u::str(response, "error", u::qs("conversations.history failed"));
+            return {{"ok", false}, {"error", error}, {"needsSignIn", api::isAuthError(error)}};
+        }
+        const QJsonArray current = u::array(response, "messages");
+        for (const QJsonValue value : current)
+            raw.append(value);
+        hasMore = u::boolean(response, "has_more");
+
+        latest = nextHistoryPage(current, hasMore);
+        if (latest.isEmpty())
+            break;
     }
-    const QJsonObject response = session.call(u::qs("GET"), u::qs("conversations.history"), params);
-    if (!u::boolean(response, "ok")) {
-        const QString error = u::str(response, "error", u::qs("conversations.history failed"));
-        return {{"ok", false}, {"error", error}, {"needsSignIn", api::isAuthError(error)}};
-    }
-    const QJsonArray raw = u::array(response, "messages");
+
     const QJsonObject users = store::resolveUsers(session, collectUserIds(raw));
     const QJsonArray shaped = shapeMessages(raw, users, session.mineIds());
     archiveMessages(session, channel, shaped);
+
+    // Everything found goes to the archive, only what was asked for goes back:
+    // the wider pages above can overshoot the caller's limit by a lot, and the
+    // panel pages from the oldest message it was given.
+    QJsonArray page = shaped;
+    if (limit > 0 && page.size() > limit) {
+        page = QJsonArray{};
+        for (int i = 0; i < limit; ++i)
+            page.append(shaped.at(i));
+        hasMore = true;
+    }
+
     return {{"ok", true},
-            {"messages", shaped},
+            {"messages", page},
             {"users", users},
             {"readCursor", store::cursorFor(store::cursors(session), channel)},
-            {"hasMore", u::boolean(response, "has_more")}};
+            {"hasMore", hasMore}};
 }
 
 QJsonObject replies(api::Session& session, const QString& channel, const QString& thread) {
@@ -553,7 +619,13 @@ QJsonObject poll(api::Session& session, const QString& idsCsv) {
 
         for (const QJsonValue value : u::array(response, "messages")) {
             const QJsonObject message = value.toObject();
-            if (!haveLatest && interestingSubtype(u::str(message, "subtype"))) {
+            // Joins and leaves are dropped from the transcript, so counting
+            // them as unread promises content that opening the conversation
+            // can never show: #random sat on a badge of six that was six
+            // "has joined the channel" lines.
+            if (!interestingSubtype(u::str(message, "subtype")))
+                continue;
+            if (!haveLatest) {
                 latest = message;
                 haveLatest = true;
             }

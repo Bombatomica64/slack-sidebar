@@ -8,6 +8,7 @@
 #   make                 build the helper into build/
 #   make test            build and run the unit tests
 #   make check           the full CI gate: strict warnings, tests, sanitizers
+#   make luau            parse every .luau entry point of the plugin
 #   make install         install the agent where the plugin looks for it
 #   make clean
 #
@@ -16,7 +17,8 @@
 #   STRICT=1             turn warnings into errors (CI does; a user build does not)
 #   SANITIZE=1           build with AddressSanitizer and UndefinedBehaviorSanitizer
 #   PORTABLE=1           link libstdc++/libgcc statically, for release artifacts
-#   PREFIX=...           install root (default: the plugin's own cache dir)
+#   PREFIX=...           install root (default: the v5 plugin directory, so the
+#                        helper lands at <pluginDir>/bin/slack-agent)
 
 # `?=` would lose to make's own built-in default for CXX, which is always set;
 # `origin` is how you tell "the user asked for g++" from "make guessed".
@@ -25,7 +27,10 @@ ifeq ($(origin CXX),default)
 endif
 
 BUILDDIR ?= build
-PREFIX   ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/noctalia-slack
+# Noctalia v5 resolves the helper as `noctalia.pluginDir() .. "/bin/slack-agent"`,
+# so the install root is the plugin directory itself and not a private cache dir
+# the way it was under v4. Overridable: `make install PREFIX=/somewhere/else`.
+PREFIX   ?= $(if $(XDG_DATA_HOME),$(XDG_DATA_HOME),$(HOME)/.local/share)/noctalia/plugins/slack
 BINDIR   ?= $(PREFIX)/bin
 
 CMAKE  ?= cmake
@@ -60,17 +65,24 @@ else
   SAN_UNAVAILABLE := $(CXX) is gcc, which ICEs compiling a module with -fsanitize - use CXX=clang++
 endif
 
-# QML has no compiler to run in CI, but qmlformat parses it, and a parse gate is
-# most of what a QML syntax error costs you. Deliberately not a CMake target:
-# the CI job that runs it installs the QML tooling and nothing else, and should
-# not need Qt's development headers to check that a .qml file parses.
-QMLFORMAT := $(shell command -v qmlformat 2>/dev/null || echo /usr/lib/qt6/bin/qmlformat)
-QML_FILES := $(wildcard *.qml Components/*.qml)
+# The plugin is Luau since v5. `luau-compile --null` parses and compiles every
+# entry point and throws the bytecode away, which is the whole syntax gate the
+# old qmlformat pass was: a broken entry point is otherwise only visible as a
+# plugin that silently fails to load.
+#
+# Not luau-analyze: the host injects `noctalia`, `ui`, `panel` and `widget` as
+# globals and calls `onOpen`/`update`/`onClick` itself, so an untyped analyze
+# pass reports nothing but unknown globals and unused functions.
+#
+# Deliberately not a CMake target: the CI job that runs it downloads one zip and
+# needs no C++ toolchain at all.
+LUAU_COMPILE := $(shell command -v luau-compile 2>/dev/null || echo luau-compile)
+LUAU_FILES   := $(wildcard *.luau)
 
 FUZZ_TIME      ?= 60
 COVERAGE_FLOOR ?= 25
 
-.PHONY: all configure test check qml fuzz coverage install uninstall clean help print-config
+.PHONY: all configure test check luau fuzz coverage install uninstall clean help print-config
 
 all: configure
 	@$(CMAKE) --build $(BUILDDIR)
@@ -93,15 +105,15 @@ ifeq ($(CAN_SANITIZE),1)
 else
 	@echo "skipped: $(SAN_UNAVAILABLE)"
 endif
-	@$(MAKE) --no-print-directory qml
+	@$(MAKE) --no-print-directory luau
 
-qml:
-	@if [ ! -x "$(QMLFORMAT)" ]; then \
-	  echo "skipped: qmlformat not found (install qt6-declarative-dev-tools)"; exit 0; \
+luau:
+	@if ! command -v $(LUAU_COMPILE) >/dev/null 2>&1 && [ ! -x "$(LUAU_COMPILE)" ]; then \
+	  echo "skipped: luau-compile not found (get it from the luau-lang/luau releases)"; exit 0; \
 	fi; \
 	fail=0; \
-	for f in $(QML_FILES); do \
-	  if "$(QMLFORMAT)" -n "$$f" >/dev/null; then echo "ok   $$f"; else fail=1; fi; \
+	for f in $(LUAU_FILES); do \
+	  if "$(LUAU_COMPILE)" --null "$$f" >/dev/null; then echo "ok   $$f"; else fail=1; fi; \
 	done; \
 	exit $$fail
 
@@ -134,4 +146,4 @@ print-config:
 	@echo "-- builddir   $(BUILDDIR)"
 
 help:
-	@sed -n '1,19p' $(firstword $(MAKEFILE_LIST)) | sed 's/^# \{0,1\}//'
+	@sed -n '1,21p' $(firstword $(MAKEFILE_LIST)) | sed 's/^# \{0,1\}//'

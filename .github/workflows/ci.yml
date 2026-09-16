@@ -220,55 +220,151 @@ jobs:
           path: build/cov/html
           if-no-files-found: ignore
 
-  qml:
-    name: qml syntax
+  luau:
+    name: luau syntax
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Qt QML tooling
+      # The plugin is Luau since v5, and Luau is not packaged on the runner, so
+      # the gate comes from the upstream release zip - one download, no
+      # toolchain. It replaces the qmlformat pass that used to guard the QML
+      # entry points, for the same reason: a syntax error in an entry point is
+      # otherwise invisible until the shell quietly declines to load the plugin.
+      - name: Install the Luau toolchain
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends qt6-declarative-dev-tools
+          curl -fsSL -o luau.zip \
+            https://github.com/luau-lang/luau/releases/latest/download/luau-ubuntu.zip
+          unzip -q luau.zip -d "$RUNNER_TEMP/luau"
+          chmod +x "$RUNNER_TEMP/luau/luau-compile"
+          echo "$RUNNER_TEMP/luau" >> "$GITHUB_PATH"
 
-      # A parse gate, not a lint: qmllint cannot resolve Noctalia's qs.Commons
-      # and qs.Widgets modules, so it would report nothing but unresolved
-      # imports. This catches the errors that would otherwise only show up as a
-      # blank sidebar at runtime.
-      - name: Parse every QML file
-        run: make QMLFORMAT=/usr/lib/qt6/bin/qmlformat qml
+      # luau-compile, not luau-analyze. The shell injects `noctalia`, `ui`,
+      # `panel` and `widget` as globals and calls `onOpen`/`update`/`onClick`
+      # itself, so analyze without a definitions file reports nothing but
+      # unknown globals and unused functions. --null parses and compiles every
+      # file and discards the bytecode, which is the real syntax gate.
+      - name: Parse and compile every Luau file
+        run: make luau
 
   plugin:
-    name: manifest and entry points
+    name: plugin.toml and entry points
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Every setting the pane saves has a manifest default
+      # The v5 equivalent of the old manifest.json check. plugin.toml is the
+      # only place a setting gets a default and a label, and translations/en.json
+      # the only place a tr() key resolves, so a key that exists in one and not
+      # the other is a setting that reads back nil or a label that renders as
+      # its own key - both of which only show up at runtime, in the panel.
+      - name: Settings, entry points and translations agree
         run: |
           python3 - <<'PY'
-          import json, os, re, sys
+          import json, os, re, sys, tomllib
 
-          manifest = json.load(open("manifest.json"))
-          defaults = manifest["metadata"]["defaultSettings"]
+          manifest = tomllib.load(open("plugin.toml", "rb"))
+          translations = json.load(open("translations/en.json"))
 
-          # A setting Settings.qml writes with no default in the manifest reads
-          # back as undefined on a fresh install.
-          saved = set(re.findall(r"pluginApi\.pluginSettings\.(\w+)\s*=", open("Settings.qml").read()))
-          missing = sorted(saved - set(defaults))
-          if missing:
-              sys.exit("Settings.qml saves keys with no manifest default: " + ", ".join(missing))
+          def flatten(node, prefix=""):
+              for key, value in node.items():
+                  path = f"{prefix}{key}"
+                  if isinstance(value, dict):
+                      yield from flatten(value, path + ".")
+                  else:
+                      yield path
 
-          for role, path in manifest["entryPoints"].items():
+          tr_keys = set(flatten(translations))
+          problems = []
+
+          # Every setting the manifest declares, from both the plugin-level [[setting]]
+          # blocks and the per-widget [[widget.setting]] ones.
+          declared = {s["key"] for s in manifest.get("setting", [])}
+          for widget in manifest.get("widget", []):
+              declared |= {s["key"] for s in widget.get("setting", [])}
+
+          # Entry points. A missing one is a plugin that loads as an empty shell.
+          entries = []
+          for section in ("widget", "panel", "service"):
+              for block in manifest.get(section, []):
+                  entries.append((f"{section}.{block.get('id', '?')}", block["entry"]))
+          for role, path in entries:
               if not os.path.exists(path):
-                  sys.exit(f"entryPoints.{role} points at a missing file: {path}")
+                  problems.append(f"{role} points at a missing file: {path}")
 
-          # The scripts are gone; nothing may reach for them again.
-          for qml in ["Main.qml", "Settings.qml", "Panel.qml", "BarWidget.qml"]:
-              body = open(qml).read()
-              for dead in ["slack.sh", "oauth-login.py"]:
+          sources = sorted(f for f in os.listdir(".") if f.endswith(".luau"))
+          bodies = {f: open(f).read() for f in sources}
+
+          # Both getConfig and tr are reached directly and through one-line accessors
+          # (`cfgInt(key, fallback)`, `tr(key, subst)`), so the accessors are found rather
+          # than listed: a local function whose body passes its own first parameter
+          # straight to the host call is one.
+          def call_sites(body, host_call):
+              escaped = host_call.replace(".", r"\.")
+              names = {escaped}
+              for match in re.finditer(r"local function (\w+)\((\w+)[^)]*\)(.*?)\nend", body, re.S):
+                  fn, param, code = match.groups()
+                  if re.search(rf"{escaped}\(\s*{param}\s*[,)]", code):
+                      names.add(fn)
+              for match in re.finditer(rf'(?:{"|".join(sorted(names))})\(\s*"([^"]+)"', body):
+                  yield match.group(1)
+
+          used = {}
+          used_tr = {}
+          for name, body in bodies.items():
+              for key in call_sites(body, "noctalia.getConfig"):
+                  used.setdefault(key, set()).add(name)
+              for key in call_sites(body, "noctalia.tr"):
+                  used_tr.setdefault(key, set()).add(name)
+
+          for key in sorted(used):
+              if key not in declared:
+                  where = ", ".join(sorted(used[key]))
+                  problems.append(f'getConfig("{key}") in {where} has no [[setting]] in plugin.toml')
+
+          # Translations, in both directions: a tr() with no entry renders as the raw key,
+          # and label_key/description_key are read by the shell's own settings pane.
+          manifest_tr = set()
+          def collect_keys(node):
+              if isinstance(node, dict):
+                  for key, value in node.items():
+                      if key.endswith("_key") and isinstance(value, str):
+                          manifest_tr.add(value)
+                      else:
+                          collect_keys(value)
+              elif isinstance(node, list):
+                  for item in node:
+                      collect_keys(item)
+          collect_keys(manifest)
+
+          for key in sorted(used_tr):
+              if key not in tr_keys:
+                  problems.append(f'tr("{key}") in {", ".join(sorted(used_tr[key]))} is not in translations/en.json')
+          for key in sorted(manifest_tr):
+              if key not in tr_keys:
+                  problems.append(f"plugin.toml references {key}, which is not in translations/en.json")
+
+          # Unused translations are dead weight rather than a break, so they fail the job
+          # only because letting them rot is how en.json stopped describing the plugin.
+          orphans = sorted(tr_keys - set(used_tr) - manifest_tr)
+          if orphans:
+              problems.append("translations/en.json has keys nothing uses: " + ", ".join(orphans))
+
+          # The v4 entry points and their helper scripts are gone; nothing may reach back.
+          for name, body in bodies.items():
+              for dead in ("slack.sh", "oauth-login.py", "manifest.json", "pluginApi.pluginSettings"):
                   if dead in body:
-                      sys.exit(f"{qml} still refers to {dead}, which no longer exists")
+                      problems.append(f"{name} still refers to {dead}, which no longer exists")
 
-          print(f"{len(defaults)} defaults, {len(manifest['entryPoints'])} entry points, all present")
+          unused_settings = sorted(declared - set(used))
+          if unused_settings:
+              print("note: declared but never read: " + ", ".join(unused_settings))
+
+          if problems:
+              sys.exit("\n".join(problems))
+
+          print(
+              f"{len(declared)} settings, {len(entries)} entry points, "
+              f"{len(tr_keys)} translation keys, all consistent"
+          )
           PY

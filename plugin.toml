@@ -1,0 +1,193 @@
+# Slack — read and send Slack messages from a Noctalia panel.
+#
+# Port of the v4 QML plugin (Bombatomica64/slack-sidebar) to the v5 Luau API.
+# Every Slack call still goes through the compiled `bin/slack-agent` helper,
+# which prints one JSON object per invocation; nothing here talks to Slack.
+#
+# plugin_api 9, unchanged: nothing here needs a newer level. `height = "fill"`,
+# `position = "center_right"/"center_left"` and multiple [[panel]] blocks are all
+# base manifest features; ui.markdown (API 21), container tooltips (API 32) and
+# keyboard_focus (API 10) are deliberately unused. Setting
+# `keyboard_focus = "on_demand"` on this floating panel made the shell dismiss it
+# ~600 ms after opening, so it is left at the default.
+
+id = "lollo/slack"
+name = "Slack"
+version = "1.0.0"
+plugin_api = 9
+author = "lollo"
+license = "MIT"
+icon = "brand-slack"
+description = "Read and send Slack messages: conversation list with unread badges, history, threads, reactions and desktop notifications."
+tags = ["bar", "panel", "service", "productivity", "chat"]
+
+# Intervals are seconds here; the v4 plugin stored milliseconds.
+
+[[setting]]
+key = "poll_interval"
+type = "int"
+label_key = "settings.poll_interval.label"
+description_key = "settings.poll_interval.description"
+default = 45
+min = 10
+max = 600
+
+[[setting]]
+key = "active_poll_interval"
+type = "int"
+label_key = "settings.active_poll_interval.label"
+description_key = "settings.active_poll_interval.description"
+default = 6
+min = 3
+max = 120
+
+[[setting]]
+key = "sync_interval"
+type = "int"
+label_key = "settings.sync_interval.label"
+description_key = "settings.sync_interval.description"
+default = 300
+min = 60
+max = 3600
+
+[[setting]]
+key = "history_limit"
+type = "int"
+label_key = "settings.history_limit.label"
+description_key = "settings.history_limit.description"
+default = 60
+min = 10
+max = 200
+
+[[setting]]
+key = "max_watched"
+type = "int"
+label_key = "settings.max_watched.label"
+description_key = "settings.max_watched.description"
+default = 48
+min = 1
+max = 120
+
+[[setting]]
+key = "notify_dms"
+type = "bool"
+label_key = "settings.notify_dms.label"
+description_key = "settings.notify_dms.description"
+default = true
+
+[[setting]]
+key = "notify_mentions"
+type = "bool"
+label_key = "settings.notify_mentions.label"
+description_key = "settings.notify_mentions.description"
+default = true
+
+[[setting]]
+key = "mark_read_on_open"
+type = "bool"
+label_key = "settings.mark_read_on_open.label"
+description_key = "settings.mark_read_on_open.description"
+default = true
+
+[[setting]]
+key = "archive_messages"
+type = "bool"
+label_key = "settings.archive_messages.label"
+description_key = "settings.archive_messages.description"
+default = true
+
+[[setting]]
+key = "identity_user_id"
+type = "string"
+label_key = "settings.identity_user_id.label"
+description_key = "settings.identity_user_id.description"
+default = "U0AGP9EAM0D"
+
+# Which screen edge the sidebar docks to. There is no setPlacement API, so this
+# picks between the two [[panel]] blocks declared at the bottom of this file.
+[[setting]]
+key = "side"
+type = "select"
+label_key = "settings.side.label"
+description_key = "settings.side.description"
+default = "right"
+options = [
+  { value = "right", label_key = "settings.side.options.right" },
+  { value = "left", label_key = "settings.side.options.left" },
+]
+
+[[setting]]
+key = "token_preference"
+type = "select"
+label_key = "settings.token_preference.label"
+description_key = "settings.token_preference.description"
+default = "bot"
+options = [
+  { value = "auto", label_key = "settings.token_preference.options.auto" },
+  { value = "user", label_key = "settings.token_preference.options.user" },
+  { value = "bot", label_key = "settings.token_preference.options.bot" },
+]
+
+[[widget]]
+id = "slack"
+entry = "widget.luau"
+
+  [[widget.setting]]
+  key = "show_count"
+  type = "bool"
+  label_key = "settings.show_count.label"
+  description_key = "settings.show_count.description"
+  default = true
+
+  [[widget.setting]]
+  key = "glyph_color"
+  type = "select"
+  label_key = "settings.glyph_color.label"
+  description_key = "settings.glyph_color.description"
+  default = "on_surface"
+  options = [
+    { value = "on_surface", label_key = "colors.default" },
+    { value = "primary", label_key = "colors.primary" },
+    { value = "secondary", label_key = "colors.secondary" },
+    { value = "tertiary", label_key = "colors.tertiary" },
+  ]
+
+  [[widget.setting]]
+  key = "unread_color"
+  type = "select"
+  label_key = "settings.unread_color.label"
+  description_key = "settings.unread_color.description"
+  default = "primary"
+  options = [
+    { value = "primary", label_key = "colors.primary" },
+    { value = "secondary", label_key = "colors.secondary" },
+    { value = "tertiary", label_key = "colors.tertiary" },
+    { value = "error", label_key = "colors.error" },
+  ]
+
+# Full-height edge sidebar, matching the v4 QML panel. A panel cannot resize
+# itself — width/height are read once from this manifest — so there is no
+# `panel_width` setting; edit `width` here to change it.
+#
+# Two blocks over the same panel.luau give the v4 `side` setting a home: the bar
+# widget toggles whichever id the setting selects (the phone-connect /
+# opencode-companion idiom, since there is no setPlacement API).
+[[panel]]
+id = "sidebar"
+entry = "panel.luau"
+width = 500
+height = "fill"
+placement = "floating"
+position = "center_right"
+
+[[panel]]
+id = "sidebar_left"
+entry = "panel.luau"
+width = 500
+height = "fill"
+placement = "floating"
+position = "center_left"
+
+[[service]]
+id = "slack-service"
+entry = "service.luau"

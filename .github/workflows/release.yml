@@ -31,12 +31,12 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: Check the tag matches the manifest version
+      - name: Check the tag matches the plugin version
         run: |
           tag="${{ github.event.inputs.tag || github.ref_name }}"
-          want="v$(python3 -c 'import json;print(json.load(open("manifest.json"))["version"])')"
+          want="v$(python3 -c 'import tomllib;print(tomllib.load(open("plugin.toml","rb"))["version"])')"
           if [ "$tag" != "$want" ]; then
-            echo "tag $tag does not match manifest.json version ($want)" >&2
+            echo "tag $tag does not match the plugin.toml version ($want)" >&2
             exit 1
           fi
 
@@ -76,17 +76,21 @@ jobs:
 
       # The whole plugin with the helper already built, for people who would
       # rather not install a C++26 toolchain to read Slack. The archive's top
-      # directory is `slack` because the plugin id in manifest.json has to match
-      # the directory name, so extracting it into the plugins directory is the
-      # entire install.
+      # directory is still `slack`, but for a different reason than under v4:
+      # the v5 plugin id is `lollo/slack` and lives in plugin.toml, so the shell
+      # no longer derives it from the directory name. What the directory name
+      # does decide is the install path a local plugin is loaded from and what
+      # `noctalia.pluginDir()` resolves to - which is where `bin/slack-agent`
+      # has to be - so extracting it into ~/.local/share/noctalia/plugins is
+      # still the entire install.
       - name: Package the plugin with the helper inside it
         id: bundle
         run: |
           name="slack-plugin-$(uname -m)-linux-gnu"
           mkdir -p "pkg/slack/bin"
-          cp manifest.json LICENSE README.md pkg/slack/
-          cp ./*.qml pkg/slack/
-          cp -r Components pkg/slack/
+          cp plugin.toml LICENSE README.md pkg/slack/
+          cp ./*.luau pkg/slack/
+          cp -r translations pkg/slack/
           cp build/slack-agent pkg/slack/bin/slack-agent
           chmod 0755 pkg/slack/bin/slack-agent
           tar -C pkg -czf "$name.tar.gz" slack

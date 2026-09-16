@@ -8,7 +8,8 @@
 #   make                 build the helper into build/
 #   make test            build and run the unit tests
 #   make check           the full CI gate: strict warnings, tests, sanitizers
-#   make luau            parse every .luau entry point of the plugin
+#   make luau            parse every .luau entry point, then run the scheduler sim
+#   make simulate        drive service.luau's scheduler and report requests/minute
 #   make install         install the agent where the plugin looks for it
 #   make clean
 #
@@ -79,10 +80,18 @@ endif
 LUAU_COMPILE := $(shell command -v luau-compile 2>/dev/null || echo luau-compile)
 LUAU_FILES   := $(wildcard *.luau)
 
+# The scheduler simulation. service.luau's cost is a *count* of requests, not a
+# shape any single call can be wrong about, so it is measured by running the real
+# scheduler against a stubbed host and a fake clock. Concatenated rather than
+# required: the plugin entry points are chunks the host loads, not modules.
+LUAU         := $(shell command -v luau 2>/dev/null || echo luau)
+SIM_PRELUDE  := native/tests/service_sim.luau
+SIM_DRIVER   := native/tests/service_sim_driver.luau
+
 FUZZ_TIME      ?= 60
 COVERAGE_FLOOR ?= 25
 
-.PHONY: all configure test check luau fuzz coverage install uninstall clean help print-config
+.PHONY: all configure test check luau simulate fuzz coverage install uninstall clean help print-config
 
 all: configure
 	@$(CMAKE) --build $(BUILDDIR)
@@ -115,7 +124,20 @@ luau:
 	for f in $(LUAU_FILES); do \
 	  if "$(LUAU_COMPILE)" --null "$$f" >/dev/null; then echo "ok   $$f"; else fail=1; fi; \
 	done; \
+	if [ $$fail -eq 0 ]; then $(MAKE) --no-print-directory simulate || fail=1; fi; \
 	exit $$fail
+
+# Drives service.luau's scheduler against a stubbed noctalia and a fake clock,
+# and asserts what an idle open conversation costs in Slack requests per minute.
+# This is the regression gate for the rate-limit fix: the logic was never wrong,
+# there was simply ten times too much of it.
+simulate:
+	@if ! command -v $(LUAU) >/dev/null 2>&1 && [ ! -x "$(LUAU)" ]; then \
+	  echo "skipped: luau not found (get it from the luau-lang/luau releases)"; exit 0; \
+	fi; \
+	mkdir -p $(BUILDDIR) && \
+	cat $(SIM_PRELUDE) service.luau $(SIM_DRIVER) > $(BUILDDIR)/service_sim.luau && \
+	"$(LUAU)" $(BUILDDIR)/service_sim.luau
 
 # Its own build directory: -fsanitize=fuzzer has to reach the parser as well as
 # the harness, so the whole configuration differs.

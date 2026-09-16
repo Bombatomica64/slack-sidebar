@@ -68,6 +68,27 @@ default = 48
 min = 1
 max = 120
 
+# How many of the watched conversations one poll actually asks about. Polling
+# costs one Slack request per conversation, so this - not max_watched - is what
+# sets the request rate; the rest take turns.
+[[setting]]
+key = "poll_batch"
+type = "int"
+label_key = "settings.poll_batch.label"
+description_key = "settings.poll_batch.description"
+default = 12
+min = 1
+max = 60
+
+[[setting]]
+key = "history_refresh_interval"
+type = "int"
+label_key = "settings.history_refresh_interval.label"
+description_key = "settings.history_refresh_interval.description"
+default = 180
+min = 30
+max = 3600
+
 [[setting]]
 key = "notify_dms"
 type = "bool"

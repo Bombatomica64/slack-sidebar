@@ -28,6 +28,8 @@ module;
 #include <sys/file.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <utility>
 #include <vector>
 
@@ -73,6 +75,40 @@ TokenKind kindOf(const QString& token) {
 
 bool isRotating(const QString& token) {
     return token.startsWith(QLatin1String("xoxe."));
+}
+
+// --------------------------------------------------------------- throttling
+//
+// Slack answers a throttled call with HTTP 429 and `Retry-After` in whole
+// seconds. Sleeping exactly that long is the only way to stop digging, but this
+// helper is a short-lived process the sidebar gives ninety seconds, so a long
+// Retry-After is not ours to wait out: it goes back to the caller, which backs
+// its own scheduler off instead of asking again on the next tick.
+
+// Longer than this and the wait belongs to the plugin's scheduler, not to a
+// blocked subprocess.
+inline constexpr int kRetryAfterCeilingMs = 12000;
+// attempt 1 and 2 may sleep and retry; attempt 3 reports.
+inline constexpr int kRateLimitAttempts = 3;
+
+// Milliseconds to wait before retrying, or 0 for "do not retry here, report it".
+// A missing header (retryAfterSeconds <= 0) falls back to 1s, 2s, 4s… so a 429
+// without one is still not a busy loop.
+int rateLimitWaitMs(int retryAfterSeconds, int attempt) {
+    if (attempt < 1 || attempt >= kRateLimitAttempts)
+        return 0;
+    const int waitMs =
+        retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : (1000 << (attempt - 1));
+    return waitMs > kRetryAfterCeilingMs ? 0 : waitMs;
+}
+
+// The `retryAfter` a decoded response carries, 0 when it carries none.
+int retryAfterOf(const QJsonObject& response) {
+    return response.value(u::qs("retryAfter")).toInt(0);
+}
+
+bool isRateLimited(const QJsonObject& response) {
+    return u::str(response, "error") == QLatin1String("ratelimited");
 }
 
 bool isAuthError(const QString& code) {
@@ -138,16 +174,23 @@ public:
         return {};
     }
 
-    // One API call. Retries once on ratelimited or an unreadable response, and
-    // once more after renewing a rotating token that Slack has expired.
+    // One API call. Waits out a short `Retry-After` and retries, retries once on
+    // an unreadable response, and once more after renewing a rotating token that
+    // Slack has expired. A throttle too long to wait out is returned with its
+    // `retryAfter` intact so the caller can back off rather than re-ask.
     QJsonObject call(const QString& verb, const QString& method,
                      const QList<std::pair<QString, QString>>& params = {}) {
-        for (int attempt = 1; attempt <= 2; ++attempt) {
-            const QJsonObject response = callOnce(verb, method, params);
+        QJsonObject response;
+        bool renewed = false;
+        for (int attempt = 1; attempt <= kRateLimitAttempts; ++attempt) {
+            response = callOnce(verb, method, params);
             const QString error = u::str(response, "error");
 
-            if (error == QLatin1String("ratelimited") && attempt == 1) {
-                QThread::msleep(3000);
+            if (error == QLatin1String("ratelimited")) {
+                const int waitMs = rateLimitWaitMs(retryAfterOf(response), attempt);
+                if (waitMs <= 0)
+                    return response;
+                QThread::msleep(static_cast<unsigned long>(waitMs));
                 continue;
             }
             if (error == QLatin1String("__transport") && attempt == 1) {
@@ -155,8 +198,10 @@ public:
                 continue;
             }
             if (isAuthError(error)) {
-                if (attempt == 1 && isRotating(token_) && refreshUserToken())
+                if (!renewed && isRotating(token_) && refreshUserToken()) {
+                    renewed = true;
                     continue;
+                }
                 // Renewal is impossible: the session is genuinely dead. Drop the
                 // cached identity so `me` stops cheerfully reporting a signed-in
                 // user from day-old data.
@@ -165,7 +210,7 @@ public:
             }
             return response;
         }
-        return {{"ok", false}, {"error", u::qs("no response from ") + method}};
+        return response;
     }
 
     // Several calls at once, which is what makes polling twenty conversations
@@ -197,6 +242,31 @@ public:
         } else if (expired) {
             authDead_ = true;
             QFile::remove(meCache());
+        }
+
+        // Throttling hits a batch slot by slot: the first few get through and
+        // the tail comes back 429. Re-issuing the whole batch would re-spend the
+        // budget the successful slots already paid for, so only the throttled
+        // slots are asked again, once, after the longest Retry-After any of them
+        // quoted.
+        std::vector<std::size_t> throttled;
+        int retryAfter = 0;
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            if (!isRateLimited(out[i]))
+                continue;
+            throttled.push_back(i);
+            retryAfter = std::max(retryAfter, retryAfterOf(out[i]));
+        }
+        const int waitMs = throttled.empty() ? 0 : rateLimitWaitMs(retryAfter, 1);
+        if (waitMs > 0) {
+            QThread::msleep(static_cast<unsigned long>(waitMs));
+            std::vector<net::Request> retries;
+            retries.reserve(throttled.size());
+            for (const std::size_t index : throttled)
+                retries.push_back(buildRequest(u::qs("GET"), method, paramSets[index]));
+            const std::vector<net::Response> responses = http_.requestMany(retries);
+            for (std::size_t i = 0; i < throttled.size(); ++i)
+                out[throttled[i]] = decode(responses[i], method);
         }
         return out;
     }
@@ -325,6 +395,21 @@ private:
     }
 
     [[nodiscard]] static QJsonObject decode(const net::Response& response, const QString& method) {
+        // 429 is the one status worth reading before the body: Slack sometimes
+        // answers a throttle with an empty one, and the header carries the only
+        // number that matters. Normalising it here means every caller sees the
+        // same `ratelimited` + `retryAfter` shape.
+        if (response.status == 429) {
+            bool parsed = false;
+            QJsonObject object = u::parseObject(response.body, &parsed);
+            if (!parsed)
+                object = QJsonObject{};
+            object[u::qs("ok")] = false;
+            object[u::qs("error")] = u::qs("ratelimited");
+            object[u::qs("retryAfter")] = response.retryAfterSeconds;
+            object[u::qs("method")] = method;
+            return object;
+        }
         if (!response.transportOk())
             return {{"ok", false}, {"error", u::qs("__transport")}, {"method", method}};
         bool parsed = false;

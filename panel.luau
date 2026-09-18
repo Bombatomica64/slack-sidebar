@@ -188,19 +188,51 @@ end
 
 -- ── messages ─────────────────────────────────────────────────────────────────
 
+-- One reaction as the v4 pill: the emoji itself (unicode, or the workspace's
+-- custom image), then the count. A ui.row rather than a ui.button because a
+-- button can carry neither an image nor two differently coloured labels. The
+-- shortcode is only shown when the service could not resolve it.
+local function reactionPill(message, r)
+  local name = tostring(r.name or "")
+  local mine = r.mine == true
+  local face
+  local image = tostring(r.image or "")
+  local char = tostring(r.char or "")
+  if image ~= "" then
+    face = ui.image({ path = image, width = 16, height = 16, fit = "contain" })
+  elseif char ~= "" then
+    face = ui.label({ text = char, fontSize = 13, baseline = "pictographic" })
+  else
+    face = ui.label({ text = `:{name}:`, fontSize = 11, color = "on_surface_variant" })
+  end
+  return ui.row({
+    key = `react-{message.ts}-{name}`,
+    gap = 4,
+    align = "center",
+    paddingH = 7,
+    paddingV = 2,
+    radius = 10,
+    fill = mine and "primary/0.18" or "surface_variant",
+    border = mine and "primary" or "outline",
+    borderWidth = 1,
+    onClick = function()
+      send("react", { ts = message.ts, name = name, mine = mine })
+    end,
+  }, {
+    face,
+    ui.label({
+      text = tostring(r.count or 0),
+      fontSize = 11,
+      fontWeight = "bold",
+      color = mine and "primary" or "on_surface_variant",
+    }),
+  })
+end
+
 local function reactionRow(message)
   local buttons = {}
   for _, r in ipairs(message.reactions or {}) do
-    local name = tostring(r.name or "")
-    local mine = r.mine == true
-    table.insert(buttons, ui.button({
-      key = `react-{message.ts}-{name}`,
-      text = `:{name}: {r.count}`,
-      variant = mine and "primary" or "ghost",
-      onClick = function()
-        send("react", { ts = message.ts, name = name, mine = mine })
-      end,
-    }))
+    table.insert(buttons, reactionPill(message, r))
   end
   table.insert(buttons, ui.button({
     key = `react-add-{message.ts}`,

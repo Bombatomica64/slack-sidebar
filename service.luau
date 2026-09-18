@@ -257,6 +257,40 @@ local EMOJI = {
   facepalm = "\u{1F926}", party_parrot = "\u{1F99C}", frog = "\u{1F438}",
 }
 
+-- The table above is the v4 list and misses most of what people actually react
+-- with (:kiss:, :rolling_on_the_floor_laughing:, :keycap_ten:...). emoji.json is
+-- every Slack short name -> unicode, generated from iamcal/emoji-data (the data
+-- set Slack itself uses); it fills the gaps and never overrides the table.
+do
+  local raw = noctalia.readFile(`{noctalia.pluginDir()}/emoji.json`)
+  local ok, data = pcall(function() return raw and raw ~= "" and noctalia.json.decode(raw) or nil end)
+  if ok and type(data) == "table" then
+    for name, char in pairs(data) do
+      if EMOJI[name] == nil and type(char) == "string" then EMOJI[name] = char end
+    end
+  end
+end
+
+-- Workspace custom emoji from the agent's `emoji` verb: name -> local image, and
+-- alias name -> target name. Empty until the first answer lands.
+local customEmoji = { emoji = {}, aliases = {} }
+
+-- A reaction name as a face: `{ char = "👍" }`, `{ image = "/path.png" }`, or nil
+-- when nothing is known about it. Slack reports skin tones as
+-- `+1::skin-tone-2`; the base emoji is what we can draw.
+local function emojiFace(name)
+  local key = tostring(name or ""):lower():gsub("::skin%-tone%-%d$", "")
+  for _ = 1, 2 do
+    if EMOJI[key] then return { char = EMOJI[key] } end
+    local path = customEmoji.emoji[key]
+    if type(path) == "string" and path ~= "" then return { image = path } end
+    local target = customEmoji.aliases[key]
+    if type(target) ~= "string" or target == "" then return nil end
+    key = target:lower()
+  end
+  return nil
+end
+
 -- Mrkdwn.js renderEntity/preview, minus the HTML: one <...> token to plain text.
 local function resolveEntity(inner)
   local bar = inner:find("|", 1, true)
@@ -589,10 +623,14 @@ local function messageView(m)
   local reactions = {}
   if type(m.reactions) == "table" then
     for _, r in ipairs(m.reactions) do
+      local name = tostring(r.name or "")
+      local face = emojiFace(name)
       table.insert(reactions, {
-        name = tostring(r.name or ""),
+        name = name,
         count = tonumber(r.count) or 0,
         mine = r.mine == true,
+        char = face and face.char or "",
+        image = face and face.image or "",
       })
     end
   end
@@ -668,6 +706,20 @@ local function publishActive()
     error = rateLimited and noctalia.tr("error.rate_limited") or "",
     revision = activeRevision,
   })
+end
+
+-- Custom emoji only change the look of reactions, so a failure keeps whatever
+-- we had; the agent caches the list for a day and mirrors the images locally.
+local function refreshEmoji()
+  runAgent({ "emoji" }, "emoji", 120000, function(res)
+    if res and type(res.emoji) == "table" then
+      customEmoji = {
+        emoji = res.emoji,
+        aliases = type(res.aliases) == "table" and res.aliases or {},
+      }
+      publishActive()
+    end
+  end)
 end
 
 -- ── notifications ────────────────────────────────────────────────────────────
@@ -1148,6 +1200,7 @@ noctalia.runAsync(`test -x {shellQuote(AGENT)} && {shellQuote(AGENT)} credential
     refreshList(false)
     poll()
     refreshAvatars()
+    refreshEmoji()
   else
     ready = false
     lastError = noctalia.tr("error.no_agent", { path = AGENT })
